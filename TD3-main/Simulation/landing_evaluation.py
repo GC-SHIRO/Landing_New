@@ -80,6 +80,8 @@ class LandingEvaluation:
     def __init__(
         self,
         platform_type: str = "dynamic",
+        marker_offset_x: float = -0.20,
+        marker_offset_y: float = 0.0,
         marker_offset_z: float = 1.3,
         err3d_threshold: float = 1.2,
         v_rel_max: float = 1.5,
@@ -89,6 +91,8 @@ class LandingEvaluation:
         **_legacy_kwargs,
     ):
         self.platform_type = platform_type
+        self.marker_offset_x = float(marker_offset_x)
+        self.marker_offset_y = float(marker_offset_y)
         self.marker_offset_z = float(marker_offset_z)
         self.err3d_threshold = float(err3d_threshold)
         self.v_rel_max = float(v_rel_max)
@@ -338,8 +342,24 @@ class LandingEvaluation:
         return float("nan")
 
 
-def compute_dynamic_target(ship_x, ship_y, ship_z, marker_offset_z=1.3):
-    return (ship_x, ship_y, ship_z + marker_offset_z)
+def compute_dynamic_target(
+    ship_x,
+    ship_y,
+    ship_z,
+    ship_yaw=0.0,
+    marker_offset_x=-0.20,
+    marker_offset_y=0.0,
+    marker_offset_z=1.3,
+):
+    cos_yaw = np.cos(ship_yaw)
+    sin_yaw = np.sin(ship_yaw)
+    world_offset_x = cos_yaw * marker_offset_x - sin_yaw * marker_offset_y
+    world_offset_y = sin_yaw * marker_offset_x + cos_yaw * marker_offset_y
+    return (
+        ship_x + world_offset_x,
+        ship_y + world_offset_y,
+        ship_z + marker_offset_z,
+    )
 
 
 def estimate_velocity_from_positions(positions, dt):

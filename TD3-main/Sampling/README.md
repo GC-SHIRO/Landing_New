@@ -47,6 +47,8 @@ observation, action, reward, next_observation, done
 - 下降前要求水平误差不超过 `0.25m`。
 - 成功数据要求甲板接触时水平误差不超过 `0.25m`。
 - 低空阶段使用更强的水平 PD 增益持续锁定 marker 中心。
+- `marker.dae` 的图案几何中心相对 WAM-V `base_link` 为船体系
+  `(-0.20, 0.0, 1.3) m`；采集、落地判定与评估均使用该中心，且 XY 偏移会随船 yaw 旋转。
 - Step1 默认船速提高到 `0.5m/s`。
 - 正常下降速度提高到 `0.70m/s`，减速段为 `0.22m/s`。
 - 起始跟踪高度从 `3.0m` 降低到 `2.5m`，减少无效悬停时间。
@@ -122,6 +124,39 @@ python TD3-main/Sampling/collect_dynamic_expert.py --step 4 --curve sine --episo
 ```
 
 Step2–4 应在 Step1 成功率和接触速度稳定后逐级启用，不建议直接混合采集。
+
+## 随机 Step0-4 采集
+
+`random_dynamic_expert.py` 用于生成覆盖静止、直线、变速直线、曲线和变速曲线的
+混合专家数据。默认采集 300 个回合，并以分层随机方式保证 Step0-4 各有 60 个回合；
+每个回合的方向、轨迹形状和速度独立随机，固定 `--seed` 时可复现。
+
+```bash
+python TD3-main/Sampling/random_dynamic_expert.py
+```
+
+船速会在约 0-1.2 m/s 内随机生成；专家的 XY 指令上限保留为 2.0 m/s，以便在追赶
+移动甲板时留出闭合误差余量。Step0 是执行完整无人机降落过程的静止或近静止甲板
+基线，不是 `step0_env.py` 的船体单独验证程序。抽到接近静止的曲线时，场景会降级为
+静止甲板，避免生成无意义的超长圆周周期；圆周半径限制在 1.5-3.0m，保持目标在采集
+视野附近。
+
+成功回合默认写入：
+
+```text
+expert_data_dynamic/random_dynamic_privileged_pd.jsonl
+```
+
+所有非空回合默认写入：
+
+```text
+expert_data_dynamic/random_dynamic_privileged_pd_all.jsonl
+```
+
+每个 transition 的 `scenario` 字段保存 Step、轨迹模式、曲线类型、回合种子、方向、
+速度/速度区间和曲线几何参数，方便之后按场景切分或审计数据。该脚本仅生成专家数据；
+它会以 2.0 m/s 配置本次采集的专家动作上限，但不会修改现有离线训练的动作尺度或
+checkpoint。
 
 ## 离线测试
 

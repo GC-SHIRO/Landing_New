@@ -29,6 +29,8 @@ VEHICLE_ID = "0"
 SHIP_INIT_X = 10.0
 SHIP_INIT_Y = 5.0
 SHIP_INIT_Z = 0.1
+MARKER_OFFSET_X = -0.23
+MARKER_OFFSET_Y = 0.0
 MARKER_OFFSET_Z = 1.3
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..")
@@ -95,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_height", type=float, default=12.0)
     parser.add_argument("--reset_settle", type=float, default=0.4)
     parser.add_argument("--roscore_wait", type=float, default=2.0)
-    parser.add_argument("--gazebo_wait", type=float, default=10.0)
+    parser.add_argument("--gazebo_wait", type=float, default=20.0)
     parser.add_argument("--startup_warmup", type=float, default=3.0)
     parser.add_argument("--min_success_steps", type=int, default=15)
     return parser
@@ -228,7 +230,12 @@ def current_truth(
             dtype=np.float64,
         )
     target_position = np.asarray(
-        controller.get_landing_target(MARKER_OFFSET_Z), dtype=np.float64
+        controller.get_landing_target(
+            marker_offset_z=MARKER_OFFSET_Z,
+            marker_offset_x=MARKER_OFFSET_X,
+            marker_offset_y=MARKER_OFFSET_Y,
+        ),
+        dtype=np.float64,
     )
     target_velocity = np.asarray(
         controller.get_landing_velocity(), dtype=np.float64
@@ -313,7 +320,9 @@ def main() -> None:
             init_z=SHIP_INIT_Z,
         )
         env.landing_target_fn = lambda: controller.get_landing_target(
-            MARKER_OFFSET_Z
+            marker_offset_z=MARKER_OFFSET_Z,
+            marker_offset_x=MARKER_OFFSET_X,
+            marker_offset_y=MARKER_OFFSET_Y,
         )
         env.landing_velocity_fn = controller.get_landing_velocity
 

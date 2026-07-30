@@ -169,10 +169,19 @@ class ShipMotionController:
     def get_current_pos(self):
         return self._pos.copy()
 
-    def get_landing_target(self, marker_offset_z):
+    def get_landing_target(
+        self,
+        marker_offset_z,
+        marker_offset_x=0.0,
+        marker_offset_y=0.0,
+    ):
+        cos_yaw = math.cos(self._yaw)
+        sin_yaw = math.sin(self._yaw)
+        world_offset_x = cos_yaw * marker_offset_x - sin_yaw * marker_offset_y
+        world_offset_y = sin_yaw * marker_offset_x + cos_yaw * marker_offset_y
         return (
-            float(self._pos[0]),
-            float(self._pos[1]),
+            float(self._pos[0] + world_offset_x),
+            float(self._pos[1] + world_offset_y),
             float(self._z + marker_offset_z),
         )
 

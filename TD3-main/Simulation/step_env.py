@@ -39,6 +39,8 @@ VEHICLE_ID = "0"
 SHIP_INIT_X = 10.0
 SHIP_INIT_Y = 5.0
 SHIP_INIT_Z = 0.1
+MARKER_OFFSET_X = -0.20  # marker.dae 几何中心相对 base_link 的船体 x 偏移
+MARKER_OFFSET_Y = 0.0
 MARKER_OFFSET_Z = 1.3  # marker 距船 base_link 高度 (wamv_gazebo.urdf.xacro)
 
 
@@ -102,9 +104,9 @@ def main():
                         help='步长时间 (秒)')
 
     # ---- 船体运动 ----
-    parser.add_argument('--step', type=int, choices=(1, 2, 3, 4), default=1,
+    parser.add_argument('--step', type=int, choices=(1, 2, 3, 4), default=3,
                         help='运动难度阶段: 1匀速直线, 2变速直线, 3匀速曲线, 4曲线变速')
-    parser.add_argument('--curve', choices=('sine', 'circle'), default='sine',
+    parser.add_argument('--curve', choices=('sine', 'circle'), default='circle',
                         help='Step3/4 曲线类型')
     parser.add_argument('--vx', '--ship_vx', dest='vx', type=float, default=None,
                         help='前进方向 x 分量；Step1 默认0.7，其余默认1.0')
@@ -129,13 +131,13 @@ def main():
 
     # ---- 模型加载 ----
     parser.add_argument('--ckpt_dir', type=str,
-                        default='/home/shiro/Landing_new/checkpoints/TD3/LSTM',
+                        default='/home/shiro/Landing_new/checkpoints/TD3/random_dynamic',
                         help='模型权重目录')
-    parser.add_argument('--load_step', type=int, default=60000,
+    parser.add_argument('--load_step', type=int, default=100000,
                         help='加载步数')
     parser.add_argument('--state_dim', type=int, default=3)
     parser.add_argument('--action_dim', type=int, default=3)
-    parser.add_argument('--max_action', type=float, default=1.0)
+    parser.add_argument('--max_action', type=float, default=2.0)
     parser.add_argument('--capacity', type=int, default=65536)
 
     # ---- LSTM 参数 (必须与训练一致) ----
@@ -157,10 +159,10 @@ def main():
     # ---- 判定阈值 ----
     parser.add_argument('--landing_xy_thresh', type=float, default=1.5,
                         help='无人机到降落点最大水平距离 m')
-    parser.add_argument('--visual_x_limit', type=float, default=8.0,
-                        help='YOLO视觉X越界阈值, 默认 |x|>8m')
-    parser.add_argument('--visual_y_limit', type=float, default=6.0,
-                        help='YOLO视觉Y越界阈值, 默认 |y|>6m')
+    parser.add_argument('--visual_x_limit', type=float, default=20.0,
+                        help='YOLO视觉X越界阈值, 默认 |x|>20m')
+    parser.add_argument('--visual_y_limit', type=float, default=20.0,
+                        help='YOLO视觉Y越界阈值, 默认 |y|>20m')
     parser.add_argument('--yolo_lost_timeout', type=float, default=2.0,
                         help='YOLO观测新鲜度窗口；失检不直接结束回合')
     parser.add_argument('--settle_seconds', type=float, default=0.0,
@@ -225,7 +227,11 @@ def main():
         print(f"  ✓ ShipMotionController 就绪: {motion_name}")
 
         # 绑定动态目标: 相对 marker 成功边界 (与 LandingEvaluation 一致)
-        env.landing_target_fn = lambda: controller.get_landing_target(MARKER_OFFSET_Z)
+        env.landing_target_fn = lambda: controller.get_landing_target(
+            marker_offset_z=MARKER_OFFSET_Z,
+            marker_offset_x=MARKER_OFFSET_X,
+            marker_offset_y=MARKER_OFFSET_Y,
+        )
         env.landing_velocity_fn = controller.get_landing_velocity
         env.landing_xy_threshold = args.landing_xy_thresh
         env.visual_x_limit = args.visual_x_limit
@@ -292,20 +298,17 @@ def main():
 
         for episode_id in range(1, args.test_episodes + 1):
             # ---- 4a. Reset ----
+            # 先将船复位，再让无人机按当前甲板位置重置，避免两者状态不同步。
+            controller.teleport_to_origin()
+            env.unpause()
+            time.sleep(0.3)
+            env.pause()
             try:
                 obs = env.reset()
             except Exception as e:
                 print(f"  Ep {episode_id:3d}: ✗ RESET_FAILED: {e}")
                 crash_count += 1
                 continue
-
-            # 船瞬移回原点
-            controller.teleport_to_origin()
-
-            # 让 Gazebo 处理瞬移 (物理引擎需要时间窗口)
-            env.unpause()
-            time.sleep(0.3)
-            env.pause()
 
             obs = np.asarray(obs, dtype=np.float32).reshape(-1)
             norm_obs = normalize(obs)
@@ -423,10 +426,17 @@ def main():
                 ship_sz = float(ship_state["pos_z"])
                 ship_vx = float(ship_vel_arr[0])
                 ship_vy = float(ship_vel_arr[1])
+                ship_yaw = float(ship_state["yaw"])
 
-                # 目标点 = 船 base_link + marker 偏移
+                # 目标点 = 船 base_link + 旋转后的 marker 几何中心偏移
                 target_x, target_y, target_z = compute_dynamic_target(
-                    ship_sx, ship_sy, ship_sz, marker_offset_z=evaluator.marker_offset_z
+                    ship_sx,
+                    ship_sy,
+                    ship_sz,
+                    ship_yaw=ship_yaw,
+                    marker_offset_x=evaluator.marker_offset_x,
+                    marker_offset_y=evaluator.marker_offset_y,
+                    marker_offset_z=evaluator.marker_offset_z,
                 )
 
                 rel_dyn = build_relative_dynamics(
