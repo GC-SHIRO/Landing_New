@@ -22,7 +22,11 @@ class ShipMotionController:
         self.init_pos = np.array(init_pos, dtype=np.float64)
         self.init_z = float(init_z)
         self.kp = float(kp)
-        self.max_speed = max_speed
+        # A supplied value is a hard safety cap.  Previously _ensure_max_speed
+        # could raise an explicitly requested cap while compensating tracking
+        # error, which made a "1 m/s" scenario publish faster commands.
+        self.max_speed = None if max_speed is None else float(max_speed)
+        self._hard_max_speed = max_speed is not None
 
         self._set_state_pub = rospy.Publisher("/gazebo/set_model_state", ModelState, queue_size=1)
         self._model_sub = rospy.Subscriber("/gazebo/model_states", ModelStates,
@@ -395,6 +399,8 @@ class ShipMotionController:
         return self._scale_velocity(base_vel, speed)
 
     def _ensure_max_speed(self, nominal_speed=None):
+        if self._hard_max_speed:
+            return
         if nominal_speed is None:
             nominal_speed = float(np.linalg.norm(self._target_vel))
         needed = max(0.5, 2.0 * float(nominal_speed))

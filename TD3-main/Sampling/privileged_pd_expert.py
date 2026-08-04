@@ -4,7 +4,7 @@
 
 from dataclasses import asdict, dataclass
 import math
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -19,8 +19,12 @@ class PrivilegedPDConfig:
     approach_height: float = 2.5
     tracking_height: float = 1.2
     approach_gate_xy: float = 1.0
-    descent_gate_xy: float = 0.25
+    brake_gate_xy: float = 0.60
+    descent_gate_xy: float = 0.30
     descent_gate_rel_speed: float = 0.25
+    stable_steps_required: int = 2
+    brake_xy_speed: float = 0.50
+    stable_xy_speed: float = 0.20
     flare_height: float = 0.65
     touchdown_height: float = 0.12
     kp_z: float = 0.85
@@ -30,6 +34,8 @@ class PrivilegedPDConfig:
     touchdown_descent_speed: float = 0.10
     max_xy_speed: float = 1.0
     max_action: float = 1.0
+    # This PX4/MAVROS stack consumes the velocity command with z-up semantics.
+    # Keep it aligned with the existing environment and successful manual data.
     body_z_down: bool = False
 
     def validate(self) -> None:
@@ -41,8 +47,10 @@ class PrivilegedPDConfig:
             self.kp_z,
         ) < 0:
             raise ValueError("PD 增益必须非负")
-        if self.approach_gate_xy <= self.descent_gate_xy:
-            raise ValueError("approach_gate_xy 必须大于 descent_gate_xy")
+        if not self.approach_gate_xy > self.brake_gate_xy > self.descent_gate_xy:
+            raise ValueError("要求 approach_gate_xy > brake_gate_xy > descent_gate_xy")
+        if self.stable_steps_required <= 0:
+            raise ValueError("stable_steps_required 必须为正数")
         if self.approach_height <= self.tracking_height:
             raise ValueError("approach_height 必须大于 tracking_height")
         if self.tracking_height <= self.flare_height:
@@ -74,9 +82,10 @@ class PrivilegedPDExpert:
     def __init__(self, config: PrivilegedPDConfig = None):
         self.config = config or PrivilegedPDConfig()
         self.config.validate()
+        self._stable_steps = 0
 
     def reset(self) -> None:
-        return None
+        self._stable_steps = 0
 
     def compute_action(
         self,
@@ -100,12 +109,18 @@ class PrivilegedPDExpert:
         precision_mode = relative_height <= self.config.precision_height
         kp_xy = self.config.precision_kp_xy if precision_mode else self.config.kp_xy
         kd_xy = self.config.precision_kd_xy if precision_mode else self.config.kd_xy
-        world_xy = (
-            target_velocity[:2]
-            + kp_xy * position_error[:2]
+        correction_xy = (
+            kp_xy * position_error[:2]
             + kd_xy * velocity_error[:2]
         )
-        world_xy = self._limit_norm(world_xy, self.config.max_xy_speed)
+        correction_speed_limit = self._xy_speed_limit(horizontal_error)
+        # Keep the platform-velocity feed-forward intact.  Limiting the total
+        # velocity here made the aircraft slower than a moving deck near the
+        # target, so it could never settle enough to enter DESCEND.
+        correction_xy = self._limit_norm(correction_xy, correction_speed_limit)
+        world_xy = self._limit_norm(
+            target_velocity[:2] + correction_xy, self.config.max_xy_speed
+        )
 
         phase, world_vz = self._vertical_command(
             horizontal_error=horizontal_error,
@@ -133,6 +148,8 @@ class PrivilegedPDExpert:
             "position_error_z": float(position_error[2]),
             "target_speed": float(np.linalg.norm(target_velocity[:2])),
             "precision_mode": float(precision_mode),
+            "correction_speed_limit": float(correction_speed_limit),
+            "stable_steps": float(self._stable_steps),
         }
         return ExpertCommand(
             action=action,
@@ -147,21 +164,36 @@ class PrivilegedPDExpert:
         relative_xy_speed: float,
         relative_height: float,
     ) -> Tuple[str, float]:
-        gate_open = (
+        stable = (
             horizontal_error <= self.config.descent_gate_xy
             and relative_xy_speed <= self.config.descent_gate_rel_speed
         )
+        self._stable_steps = self._stable_steps + 1 if stable else 0
+        gate_open = self._stable_steps >= self.config.stable_steps_required
 
         if not gate_open:
             approach = horizontal_error > self.config.approach_gate_xy
-            desired_height = self.config.approach_height if approach else self.config.tracking_height
+            # Once horizontally close, hold (or regain) the tracking height
+            # while braking.  Do not turn an unclosed horizontal velocity into
+            # a landing descent merely because the vehicle is already above
+            # the deck.
+            desired_height = (
+                self.config.approach_height
+                if approach
+                else max(self.config.tracking_height, relative_height)
+            )
             height_error = desired_height - relative_height
             world_vz = np.clip(
                 self.config.kp_z * height_error,
                 -self.config.max_descent_speed,
                 self.config.max_climb_speed,
             )
-            phase = "APPROACH" if approach else "MATCH"
+            if approach:
+                phase = "APPROACH"
+            elif horizontal_error > self.config.descent_gate_xy:
+                phase = "BRAKE"
+            else:
+                phase = "STABLE_TRACK"
             return phase, float(world_vz)
 
         if relative_height > self.config.flare_height:
@@ -169,6 +201,13 @@ class PrivilegedPDExpert:
         if relative_height > self.config.touchdown_height:
             return "FLARE", -float(self.config.flare_descent_speed)
         return "TOUCHDOWN", -float(self.config.touchdown_descent_speed)
+
+    def _xy_speed_limit(self, horizontal_error: float) -> float:
+        if horizontal_error <= self.config.descent_gate_xy:
+            return self.config.stable_xy_speed
+        if horizontal_error <= self.config.brake_gate_xy:
+            return self.config.brake_xy_speed
+        return self.config.max_xy_speed
 
     @staticmethod
     def world_enu_to_body_action(
@@ -226,26 +265,58 @@ class PrivilegedPDExpert:
         return vector
 
 
+# 本地复刻 Simulation/env_base.GazeboEnv.reward_setup。
+# 仅放在 Sampling 内：不 import Simulation，也不做共享模块耦合。
+SIM_REWARD_SCALE = 0.1
+SIM_SUCCESS_REWARD = 300.0
+SIM_FAIL_REWARD = -200.0
+# env_base 终端成功框：-1.5 > x > -2.5 且 -1.5 > y > -2.5
+SIM_SUCCESS_WORLD_X = (-2.5, -1.5)
+SIM_SUCCESS_WORLD_Y = (-2.5, -1.5)
+
+
+def _simulation_l3_shaping(observation: Sequence[float]) -> float:
+    """稠密项：与 env_base.reward_setup 相同的视觉 L3 shaping。"""
+    obs = np.asarray(observation, dtype=np.float64).reshape(-1)
+    if obs.shape[0] < 3:
+        raise ValueError(f"observation 至少需要 3 维，当前形状为 {obs.shape}")
+    delta_x = float(obs[0])
+    delta_y = float(obs[1])
+    height = float(obs[2])
+    shape = -(
+        (abs(delta_x) ** 3 + abs(delta_y) ** 3 + abs(height) ** 3) ** (1.0 / 3.0)
+    )
+    return float(SIM_REWARD_SCALE * shape)
+
+
+def _in_simulation_success_box(world_x: float, world_y: float) -> bool:
+    """是否落在 env_base 终端成功框：-2.5 < x < -1.5 且 -2.5 < y < -1.5。"""
+    x_lo, x_hi = SIM_SUCCESS_WORLD_X
+    y_lo, y_hi = SIM_SUCCESS_WORLD_Y
+    return (x_lo < float(world_x) < x_hi) and (y_lo < float(world_y) < y_hi)
+
+
 def compute_transition_reward(
-    previous_distance: float,
-    current_distance: float,
-    horizontal_error: float,
-    relative_height: float,
-    relative_xy_speed: float,
-    action: Sequence[float],
-    success: bool,
+    observation: Sequence[float],
     done: bool,
+    success: bool,
+    world_x: float,
+    world_y: float,
+    next_observation: Optional[Sequence[float]] = None,
 ) -> float:
-    """为自动采集数据生成与动态目标一致的稠密奖励。"""
-    action_array = np.asarray(action, dtype=np.float64).reshape(-1)
-    progress = float(previous_distance) - float(current_distance)
-    reward = 4.0 * progress
-    reward -= 0.08 * float(horizontal_error)
-    reward -= 0.03 * abs(float(relative_height))
-    reward -= 0.04 * float(relative_xy_speed)
-    reward -= 0.01 * float(np.dot(action_array, action_array))
-    if success:
-        reward += 100.0
-    elif done:
-        reward -= 25.0
-    return float(reward)
+    """生成与 Simulation/env_base.reward_setup 对齐的逐步奖励。
+
+    这里是 Simulation 公式的本地副本，避免 Sampling 依赖 ROS/Gazebo 导入。
+    调用方应传入：
+    - observation：步进前视觉观测（与 env_base 一致）
+    - world_x/world_y：步进后无人机世界坐标
+      （env_base 在 step 后读取 self.comm.current_position）
+    - next_observation：仅为与 env_base 接口对称保留，实际不使用
+    """
+    del next_observation  # env_base 也接收该参数，但未使用
+    reward = _simulation_l3_shaping(observation)
+    if not done:
+        return float(reward)
+    if bool(success) and _in_simulation_success_box(world_x, world_y):
+        return float(SIM_SUCCESS_REWARD)
+    return float(SIM_FAIL_REWARD)

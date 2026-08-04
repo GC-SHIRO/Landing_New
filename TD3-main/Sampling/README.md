@@ -39,6 +39,20 @@ expert_data_dynamic/step1_privileged_pd_all.jsonl
 observation, action, reward, next_observation, done
 ```
 
+### 奖励（与 Simulation 对齐，Sampling 内本地复刻）
+
+`reward` 由 `Sampling/privileged_pd_expert.compute_transition_reward` 生成，公式与
+`Simulation/env_base.GazeboEnv.reward_setup` 一致，但**不 import Simulation**，避免 ROS 耦合：
+
+- 非终止：视觉 L3 shaping  
+  `0.1 * -(|x|^3 + |y|^3 + |z|^3)^(1/3)`，使用**步进前** `observation`
+- 终止：若 `success` 且世界系位置落在  
+  `-2.5 < x < -1.5` 且 `-2.5 < y < -1.5` → `+300`，否则 `-200`  
+  （世界坐标取步进后无人机真值，对应 env_base 读 `current_position`）
+
+注意：该成功框来自旧静态 pad 逻辑；动态甲板上即使 `landing_success=True`，
+世界坐标也可能不在框内，从而得到 `-200`。这是与当前 Simulation 行为对齐的结果。
+
 额外保存 `privileged_state`、`expert`、`scenario` 和 `env_info`，这些字段用于调参与
 失败分析，不会被当前离线训练数据读取器使用。
 
@@ -55,6 +69,31 @@ observation, action, reward, next_observation, done
 
 离线点质量测试覆盖 48 组初始位置，触地水平误差最大值低于 `0.01m`。Gazebo
 中的实际误差仍取决于 PX4 响应、碰撞模型和坐标转换。
+
+## 训练样本质量门控
+
+触底阶段相机过近/遮挡时 YOLO 经常冻结或失检，这是物理上预期的现象，
+不再把整条成功轨迹一票否决。
+
+当前策略：
+
+- 只把 `sample_is_usable=True` 的 transition 写入训练 jsonl。
+- `shape` / `non_finite` / `action_limit` 视为致命质量问题，整回合 reject。
+- `FLARE` / `TOUCHDOWN` 或 `relative_height <= near_ground_height` 时：
+  失检、重复帧只裁剪，不否决整回合。
+- 成功保存还要求：
+  - 落地成功
+  - 有效步数 `>= min_success_steps`（默认 15）
+  - 有效占比 `>= min_valid_ratio`（默认 0.85）
+- raw jsonl 逐步记录 `quality_accepted` / `quality_reason` / `quality_fatal`。
+
+离线回归（不需要 ROS；建议使用 `lab_env`）：
+
+```bash
+cd /home/shiro/Landing_new
+PYTHONPATH=TD3-main /home/shiro/anaconda3/envs/lab_env/bin/python \
+  -m unittest Sampling.tests.test_sample_quality_gate -v
+```
 
 ## 启动与YOLO
 

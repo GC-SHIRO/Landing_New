@@ -137,7 +137,7 @@ def main():
                         help='加载步数')
     parser.add_argument('--state_dim', type=int, default=3)
     parser.add_argument('--action_dim', type=int, default=3)
-    parser.add_argument('--max_action', type=float, default=2.0)
+    parser.add_argument('--max_action', type=float, default=1.0)
     parser.add_argument('--capacity', type=int, default=65536)
 
     # ---- LSTM 参数 (必须与训练一致) ----
@@ -222,6 +222,7 @@ def main():
             ship_name="wamv",
             init_pos=(SHIP_INIT_X, SHIP_INIT_Y),
             init_z=SHIP_INIT_Z,
+            max_speed=1.0,
         )
         motion_name = _configure_motion(controller, args)
         print(f"  ✓ ShipMotionController 就绪: {motion_name}")
