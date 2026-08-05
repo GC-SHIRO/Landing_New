@@ -60,7 +60,7 @@ import rospy
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from Simulation.ship_motion import ShipMotionController
 
-DEFAULT_LAUNCH = "/home/wantengyuan/PX4_Firmware/launch/step1_linear.launch"
+DEFAULT_LAUNCH = "/home/shiro/PX4_Firmware/launch/step1_linear.launch"
 SHIP_INIT_X = 10.0
 SHIP_INIT_Y = 5.0
 

@@ -44,7 +44,7 @@ parser.add_argument('--save_data_path', type=str,
 
 # ✅ 默认改成与你训练时一致的 ckpt_dir（非常关键）
 parser.add_argument('--ckpt_dir', type=str,
-                    default='/home/wantengyuan/Landing_new/checkpoints/TD3/LSTM',
+                    default='/home/shiro/Landing_new/checkpoints/TD3/LSTM',
                     help='模型权重文件夹路径')
 parser.add_argument('--load_step', type=int, default=60000, help='加载哪一步的模型权重')
 
@@ -303,7 +303,7 @@ def _compute_running_summary(ep_records: list):
 
 def main():
     print("=== 初始化环境与智能体 ===")
-    env = GazeboEnv("/home/wantengyuan/PX4_Firmware/launch/sandisland.launch", "iris", '0')
+    env = GazeboEnv("/home/shiro/PX4_Firmware/launch/sandisland.launch", "iris", '0')
     
     td3_args = _filter_args_for_td3_offline(args)
     agent = TD3(args.state_dim, args.action_dim, args.max_action, args.capacity, td3_args)

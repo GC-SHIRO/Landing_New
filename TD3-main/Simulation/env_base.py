@@ -18,6 +18,7 @@
 """
 
 import rospy
+import rosgraph
 import threading
 import subprocess
 import time
@@ -28,14 +29,19 @@ import signal
 
 from mavros_msgs.msg import PositionTarget, ParamValue, State
 from mavros_msgs.srv import CommandBool, SetMode, ParamSet
-from geometry_msgs.msg import PoseStamped, Pose, PointStamped
+from geometry_msgs.msg import PoseStamped, Pose, PointStamped, TwistStamped
+from gazebo_msgs.msg import ContactsState
 from std_srvs.srv import Empty
 from pyquaternion import Quaternion
 
 # 定义常量
 TIME_DELTA = 0.1
-STEP = 260
 SYSTEM_WARMUP_SECONDS = 10.0
+
+DEFAULT_LANDING_XY_THRESHOLD = 1.5
+DEFAULT_VISUAL_X_LIMIT = 8.0
+DEFAULT_VISUAL_Y_LIMIT = 6.0
+DEFAULT_YOLO_LOST_TIMEOUT = 2.0
 
 
 class GazeboEnv:
@@ -43,37 +49,69 @@ class GazeboEnv:
     """
 
     def __init__(self, launchfile, vehicle_type, vehicle_id,
-                 max_dist=15.0, max_height=12.0, landing_z_threshold=0.4,
-                 landing_target_fn=None, landing_dist_threshold=1.0,
-                 ros_port=None, launch_args=None):
+                 max_dist=15.0, max_height=12.0, landing_z_threshold=0.5,
+                 landing_target_fn=None,
+                 landing_xy_threshold=DEFAULT_LANDING_XY_THRESHOLD,
+                 visual_x_limit=DEFAULT_VISUAL_X_LIMIT,
+                 visual_y_limit=DEFAULT_VISUAL_Y_LIMIT,
+                 yolo_lost_timeout=DEFAULT_YOLO_LOST_TIMEOUT,
+                 enable_yolo=True,
+                 system_warmup_seconds=SYSTEM_WARMUP_SECONDS,
+                 roscore_wait_seconds=5.0,
+                 gazebo_wait_seconds=10.0,
+                 configure_rc_loss_exception=True,
+                 mavros_state_timeout=30.0,
+                 mavros_param_timeout=5.0):
+        self.roscore_process = None
+        self.gazebo_process = None
+        self.yolo_process = None
+        self.enable_yolo = False
+        self._closed = False
+
         rospy.loginfo("=== 初始化 GazeboEnv (Persistent YOLO Mode) ===")
         rospy.loginfo(f"参数: launchfile={launchfile}, vehicle={vehicle_type}_{vehicle_id}")
         rospy.loginfo(f"越界阈值: max_dist={max_dist:.1f}m  max_height={max_height:.1f}m "
                       f"landing_z={landing_z_threshold:.2f}m")
         if landing_target_fn is not None:
-            rospy.loginfo(f"着陆检测: 动态目标模式, 距离阈值={landing_dist_threshold:.1f}m")
+            rospy.loginfo(
+                f"动态甲板成功条件: 接触 WAM-V 甲板且水平误差"
+                f"<={landing_xy_threshold:.3f}m"
+            )
 
-        port = str(ros_port or os.environ.get("ROS_PORT", "11311"))
-        os.environ["ROS_MASTER_URI"] = f"http://127.0.0.1:{port}"
-        gazebo_port = int(os.environ.get("GAZEBO_PORT", str(int(port) + 34)))
-        os.environ["GAZEBO_MASTER_URI"] = f"http://127.0.0.1:{gazebo_port}"
-        os.environ.setdefault("ROS_IP", "127.0.0.1")
-        ros_env = os.environ.copy()
-        self.roscore_process = subprocess.Popen(["roscore", "-p", port], env=ros_env)
-        rospy.loginfo("ROS 核心已启动，端口 %s", port)
+        port = "11311"
+        if rosgraph.is_master_online():
+            rospy.loginfo("检测到已有 ROS master，直接复用: %s", os.environ.get("ROS_MASTER_URI", "http://localhost:11311"))
+        else:
+            self.roscore_process = subprocess.Popen(
+                ["roscore", "-p", port], preexec_fn=os.setsid
+            )
+            deadline = time.monotonic() + float(roscore_wait_seconds)
+            while time.monotonic() < deadline and not rosgraph.is_master_online():
+                time.sleep(0.1)
+            if not rosgraph.is_master_online():
+                raise RuntimeError(
+                    f"ROS master 在 {roscore_wait_seconds:.1f}s 内未启动"
+                )
+            rospy.loginfo("ROS 核心已启动，端口 %s", port)
 
         rospy.init_node("Landing_env", anonymous=True, disable_signals=True)
-        time.sleep(5.0)
         rospy.loginfo("正在启动Gazebo环境...")
 
         self.gazebo_process = subprocess.Popen(
-            ["roslaunch", "-p", port, launchfile] + list(launch_args or []),
-            env=ros_env, preexec_fn=os.setsid)
+            ["roslaunch", "-p", port, launchfile], preexec_fn=os.setsid
+        )
         rospy.loginfo("Gazebo 环境已启动 => %s", launchfile)
-        time.sleep(10)
+        time.sleep(float(gazebo_wait_seconds))
 
-        rospy.loginfo("初始化通信模块...")
-        self.comm = Communication(vehicle_type, vehicle_id)
+        rospy.loginfo("初始化通信模块: 等待 MAVROS/FCU 状态...")
+        self.comm = Communication(
+            vehicle_type,
+            vehicle_id,
+            configure_rc_loss_exception=configure_rc_loss_exception,
+            state_timeout=mavros_state_timeout,
+            param_timeout=mavros_param_timeout,
+        )
+        rospy.loginfo("通信模块初始化完成")
 
         th = threading.Thread(target=self.comm.start)
         th.daemon = True
@@ -83,9 +121,29 @@ class GazeboEnv:
         # Publishers / Subscribers
         rospy.loginfo("正在设置ROS话题...")
 
-        yolo_centers_topic = "/yolov11/centers"
-        rospy.loginfo(f"订阅YOLO中心点话题: {yolo_centers_topic}")
-        self.yolo_centers_sub = rospy.Subscriber(yolo_centers_topic, PointStamped, self.yolo_centers_callback)
+        self.enable_yolo = bool(enable_yolo)
+        self.system_warmup_seconds = float(system_warmup_seconds)
+        self.yolo_centers_sub = None
+        if self.enable_yolo:
+            yolo_centers_topic = "/yolov11/centers"
+            rospy.loginfo(f"订阅YOLO中心点话题: {yolo_centers_topic}")
+            self.yolo_centers_sub = rospy.Subscriber(
+                yolo_centers_topic, PointStamped, self.yolo_centers_callback
+            )
+        else:
+            rospy.loginfo("专家采样模式: 跳过 YOLO 订阅与进程启动")
+
+        velocity_topic = f"{vehicle_type}_{vehicle_id}/mavros/local_position/velocity_local"
+        rospy.loginfo(f"订阅无人机速度话题: {velocity_topic}")
+        self.velocity_sub = rospy.Subscriber(
+            velocity_topic, TwistStamped, self.velocity_callback
+        )
+
+        contact_topic = "/benchmarker/collision"
+        rospy.loginfo(f"订阅起落架碰撞话题: {contact_topic}")
+        self.contact_sub = rospy.Subscriber(
+            contact_topic, ContactsState, self.contact_callback
+        )
 
         # Gazebo services
         rospy.loginfo("正在连接Gazebo服务...")
@@ -114,19 +172,27 @@ class GazeboEnv:
         self.yolo_center_y = 0.5
         self.yolo_distance_z = 10.0
         self.last_yolo_detection_time = rospy.Time.now()
+        self.drone_linear_velocity = None
+        self.deck_contact = False
 
         self.Step = 0
 
         # 越界阈值 (可被子类或调用方覆盖)
         self.max_dist = max_dist      # 无人机距世界原点最大允许距离 (m)
         self.max_height = max_height  # 无人机最大允许高度 (m)
-        self.landing_z_threshold = landing_z_threshold  # 着陆判定高度阈值 (m)
+        self.landing_z_threshold = landing_z_threshold  # 静态模式绝对 z / 失检高度阈值 (m)
 
-        # 动态目标着陆检测 (如果为 None 则使用绝对 z 阈值)
+        # 动态甲板只使用起落架与 WAM-V 甲板的真实碰撞判定落地。
+        # 相对位置和速度仅用于记录与判断是否落在目标区域。
         self.landing_target_fn = landing_target_fn
-        self.landing_dist_threshold = landing_dist_threshold
+        self.landing_xy_threshold = float(landing_xy_threshold)
+        self.visual_x_limit = float(visual_x_limit)
+        self.visual_y_limit = float(visual_y_limit)
+        self.yolo_lost_timeout = float(yolo_lost_timeout)
+        self.landing_velocity_fn = None
+        self._episode_has_detection = False
+        self._episode_start_time = rospy.Time.now()
 
-        self.yolo_process = None
         self.yolo_package = "yolov11_ros"
         self.yolo_launch_file = "yolo_v11.launch"
 
@@ -135,12 +201,17 @@ class GazeboEnv:
 
 
         # === 修改点 1: 初始化时直接启动 YOLO，之后不再关闭 ===
-        self.start_yolo()
-        rospy.loginfo(f"系统预热等待 {SYSTEM_WARMUP_SECONDS:.1f}s，等待 ROS/XTDrone/MAVROS 话题稳定...")
-        time.sleep(SYSTEM_WARMUP_SECONDS)
+        if self.enable_yolo:
+            self.start_yolo()
+        rospy.loginfo(
+            f"系统预热等待 {self.system_warmup_seconds:.1f}s，等待 ROS/XTDrone/MAVROS 话题稳定..."
+        )
+        time.sleep(self.system_warmup_seconds)
         rospy.loginfo("系统预热完成")
 
     def start_yolo(self):
+        if not self.enable_yolo:
+            return
         if self.yolo_process is not None:
             rospy.logwarn("YOLO进程已经在运行")
             return
@@ -149,16 +220,15 @@ class GazeboEnv:
             launch_cmd = ["roslaunch", "yolov11_ros", "yolo_v11.launch"]
             self.yolo_process = subprocess.Popen(
                 launch_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
                 preexec_fn=os.setsid,
                 text=True
             )
             # 等待稍微久一点，确保显存加载完毕
             time.sleep(8)
             if self.yolo_process.poll() is not None:
-                stdout, stderr = self.yolo_process.communicate()
-                rospy.logerr(f"YOLO进程启动失败: {stderr}")
+                rospy.logerr(
+                    f"YOLO进程启动失败, returncode={self.yolo_process.returncode}"
+                )
                 self.yolo_process = None
                 return
             rospy.loginfo("YOLO进程启动成功")
@@ -168,15 +238,16 @@ class GazeboEnv:
 
     def stop_yolo(self):
         """只在整个脚本退出时调用，Reset时不调用"""
-        if self.yolo_process is not None:
+        yolo_process = getattr(self, "yolo_process", None)
+        if yolo_process is not None:
             try:
                 rospy.loginfo("停止YOLO检测进程...")
-                os.killpg(os.getpgid(self.yolo_process.pid), signal.SIGTERM)
-                self.yolo_process.wait(timeout=5)
+                os.killpg(os.getpgid(yolo_process.pid), signal.SIGTERM)
+                yolo_process.wait(timeout=5)
                 rospy.loginfo("YOLO进程已停止")
             except subprocess.TimeoutExpired:
                 rospy.logwarn("YOLO进程未正常终止，强制杀死...")
-                os.killpg(os.getpgid(self.yolo_process.pid), signal.SIGKILL)
+                os.killpg(os.getpgid(yolo_process.pid), signal.SIGKILL)
             except Exception as e:
                 rospy.logerr(f"停止YOLO进程时出错: {e}")
             finally:
@@ -191,10 +262,105 @@ class GazeboEnv:
             self.yolo_distance_z = msg.point.z
             self.last_yolo_detection_time = rospy.Time.now()
             self.yolo_detected = True
+            self._episode_has_detection = True
             # rospy.logdebug(f"YOLO检测: ...") # 减少日志打印以节省资源
         except Exception as e:
             rospy.logwarn(f"YOLO回调函数错误: {e}")
             self.yolo_detected = False
+
+    def velocity_callback(self, msg):
+        self.drone_linear_velocity = msg.twist.linear
+
+    def contact_callback(self, msg):
+        self.deck_contact = False
+        for state in msg.states:
+            collision_names = (
+                state.collision1_name.lower(),
+                state.collision2_name.lower(),
+            )
+            if any(
+                "wamv" in name
+                and ("top_base" in name or "deck_collision" in name)
+                for name in collision_names
+            ):
+                self.deck_contact = True
+                break
+
+    def _check_dynamic_landing(self):
+        result = {
+            "landed": False,
+            "deck_contact": bool(self.deck_contact),
+            "position_ok": False,
+            "relative_x": float("nan"),
+            "relative_y": float("nan"),
+            "relative_height": float("nan"),
+            "relative_xy_distance": float("nan"),
+            "relative_vx": float("nan"),
+            "relative_vy": float("nan"),
+            "relative_vz": float("nan"),
+            "relative_xy_speed": float("nan"),
+        }
+
+        if self.comm.current_position is None or self.landing_target_fn is None:
+            return result
+
+        try:
+            target_x, target_y, target_z = self.landing_target_fn()
+        except Exception as e:
+            rospy.logwarn_throttle(2.0, f"读取甲板状态失败: {e}")
+            return result
+
+        relative_x = float(self.comm.current_position.x) - float(target_x)
+        relative_y = float(self.comm.current_position.y) - float(target_y)
+        relative_height = float(self.comm.current_position.z) - float(target_z)
+        relative_xy_distance = math.hypot(relative_x, relative_y)
+        position_ok = relative_xy_distance <= self.landing_xy_threshold
+
+        if self.deck_contact:
+            result.update({
+                "landed": True,
+                "position_ok": position_ok,
+                "relative_x": relative_x,
+                "relative_y": relative_y,
+                "relative_height": relative_height,
+                "relative_xy_distance": relative_xy_distance,
+            })
+            return result
+
+        if self.drone_linear_velocity is None or self.landing_velocity_fn is None:
+            result.update({
+                "position_ok": position_ok,
+                "relative_x": relative_x,
+                "relative_y": relative_y,
+                "relative_height": relative_height,
+                "relative_xy_distance": relative_xy_distance,
+            })
+            return result
+
+        try:
+            target_vx, target_vy, target_vz = self.landing_velocity_fn()
+        except Exception as e:
+            rospy.logwarn_throttle(2.0, f"读取甲板速度失败: {e}")
+            return result
+
+        relative_vx = float(self.drone_linear_velocity.x) - float(target_vx)
+        relative_vy = float(self.drone_linear_velocity.y) - float(target_vy)
+        relative_vz = float(self.drone_linear_velocity.z) - float(target_vz)
+        relative_xy_speed = math.hypot(relative_vx, relative_vy)
+
+        result.update({
+            "landed": False,
+            "position_ok": position_ok,
+            "relative_x": relative_x,
+            "relative_y": relative_y,
+            "relative_height": relative_height,
+            "relative_xy_distance": relative_xy_distance,
+            "relative_vx": relative_vx,
+            "relative_vy": relative_vy,
+            "relative_vz": relative_vz,
+            "relative_xy_speed": relative_xy_speed,
+        })
+        return result
 
     def step(self, action):
         # rospy.logdebug(f"===== STEP开始... =====")
@@ -223,66 +389,135 @@ class GazeboEnv:
 
         self.Step += 1
 
-        # === 修改点 3: 达到最大步数时，只 set done，不杀 YOLO ===
-        if self.Step == STEP:
-            done = True
-            # self.stop_yolo()  <-- 已注释
-            self.Step = 0
-
         # print 减少频率，只打印关键信息
         # print(f"世界位置... 相对位置...")
 
-        # 着陆检测: 根据相对目标距离判定 (不依赖 YOLO)
-        #   水平误差 < 0.4m 且 垂直误差 < 0.1m → 着陆成功
+        # 动态平台只使用 WAM-V 甲板碰撞判定落地。
+        # YOLO 与相对运动只用于导航、越界和评估记录。
         landing_detected = False
+        landing_success = False
+        deck_contact = False
+        out_of_bounds = False
+        visual_out_of_bounds = False
+        lost_detection = False
+        terminal_reason = "RUNNING"
+        visual_height = float(self.yolo_distance_z)
+        relative_height = float("nan")
+        relative_xy_distance = float("nan")
+        position_ok = False
+        visual_x = float(self.yolo_center_x)
+        visual_y = float(self.yolo_center_y)
+        rel_vx = rel_vy = rel_vz = float("nan")
+        rel_xy_speed = float("nan")
+        now = rospy.Time.now()
+        detection_age = max(0.0, (now - self.last_yolo_detection_time).to_sec())
+        episode_age = max(0.0, (now - self._episode_start_time).to_sec())
+        # 只依据最后一次有效检测的时间抗抖。YOLO 短时断帧期间继续使用
+        # 最近一次有效观测，超过 timeout 后才声明真正失检。
+        detection_fresh = (
+            self._episode_has_detection
+            and detection_age <= self.yolo_lost_timeout
+        )
+
         if self.comm.current_position is not None:
             if self.landing_target_fn is not None:
-                try:
-                    tx, ty, tz = self.landing_target_fn()
-                    dx = self.comm.current_position.x - tx
-                    dy = self.comm.current_position.y - ty
-                    dz = self.comm.current_position.z - tz
-                    herr = math.sqrt(dx**2 + dy**2)
-                    verr = abs(dz)
-                    if herr < 0.4 and verr < 0.1:
-                        landing_detected = True
-                        rospy.loginfo(f"成功着陆! herr={herr:.3f}m verr={verr:.3f}m")
-                except Exception as e:
-                    rospy.logwarn(f"动态目标获取失败: {e}")
+                landing_state = self._check_dynamic_landing()
+                landing_detected = landing_state["landed"]
+                deck_contact = landing_state["deck_contact"]
+                position_ok = landing_state["position_ok"]
+                landing_success = landing_detected and position_ok
+                relative_height = landing_state["relative_height"]
+                relative_xy_distance = landing_state["relative_xy_distance"]
+                rel_vx = landing_state["relative_vx"]
+                rel_vy = landing_state["relative_vy"]
+                rel_vz = landing_state["relative_vz"]
+                rel_xy_speed = landing_state["relative_xy_speed"]
+
+                if landing_detected:
+                    terminal_reason = (
+                        "DECK_CONTACT_LANDED"
+                        if landing_success
+                        else "DECK_CONTACT_OFF_TARGET"
+                    )
+                    rospy.loginfo(
+                        f"检测到落地: contact={deck_contact}, success={landing_success}, "
+                        f"rel_h={relative_height:.3f}m, "
+                        f"rel_xy={relative_xy_distance:.3f}m, "
+                        f"rel_vxy={rel_xy_speed:.3f}m/s, rel_vz={rel_vz:.3f}m/s"
+                    )
+                elif detection_fresh and (
+                    abs(visual_x) > self.visual_x_limit
+                    or abs(visual_y) > self.visual_y_limit
+                ):
+                    visual_out_of_bounds = True
+                    out_of_bounds = True
+                    done = True
+                    terminal_reason = "YOLO_OUT_OF_BOUNDS"
+                    self.Step = 0
+                    rospy.logwarn(
+                        f"YOLO视觉越界: x={visual_x:.3f} (limit={self.visual_x_limit:.2f}), "
+                        f"y={visual_y:.3f} (limit={self.visual_y_limit:.2f})"
+                    )
             else:
                 if abs(self.comm.current_position.z) < self.landing_z_threshold:
                     landing_detected = True
+                    landing_success = True
                     rospy.loginfo("成功着陆! (静态模式)")
 
         if landing_detected:
-            target = True
+            target = landing_success
             done = True
             self.Step = 0
 
-        if self.comm.current_position is not None:
+        # 已成功触地则不再标越界/失检, 避免 SUCCESS 被覆盖
+        if not done and not landing_detected and self.comm.current_position is not None:
             x0 = self.comm.current_position.x
             y0 = self.comm.current_position.y
             z0 = self.comm.current_position.z
             dist_origin = math.sqrt(x0**2 + y0**2 + z0**2)
-            if dist_origin > self.max_dist or z0 > self.max_height:
-                rospy.logwarn(f"越界结束: Dist={dist_origin:.2f} (max={self.max_dist:.1f}), "
-                              f"Height={z0:.2f} (max={self.max_height:.1f})")
+            # z < 0: 水下无碰撞体, 必须立即终止, 否则会继续穿水飞行
+            if dist_origin > self.max_dist or z0 > self.max_height or z0 < 0.0:
+                reason = []
+                if dist_origin > self.max_dist:
+                    reason.append(f"Dist={dist_origin:.2f}>{self.max_dist:.1f}")
+                if z0 > self.max_height:
+                    reason.append(f"Height={z0:.2f}>{self.max_height:.1f}")
+                if z0 < 0.0:
+                    reason.append(f"Underwater z={z0:.2f}<0")
+                rospy.logwarn(f"越界结束: {', '.join(reason)}")
                 done = True
+                out_of_bounds = True
+                terminal_reason = "WORLD_OUT_OF_BOUNDS"
                 self.Step = 0
-                # self.stop_yolo() <-- 已注释
 
-        if not self.yolo_detected and self.comm.current_position is not None:
-            if self.comm.current_position.z < self.landing_z_threshold:
-                rospy.logwarn(f"越界结束: 未检测到目标且高度过低")
-                done = True
-                self.Step = 0
-                # self.stop_yolo() <-- 已注释
+        if done:
+            self._publish_action_velocity(np.zeros(3, dtype=np.float32))
 
         success = target and done
         info = {
-            "tag_detected": self.yolo_detected,
+            "tag_detected": detection_fresh,
+            "detection_fresh": detection_fresh,
             "target_reached": target,
-            "success": success
+            "success": success,
+            "out_of_bounds": out_of_bounds,
+            "visual_out_of_bounds": visual_out_of_bounds,
+            "lost_detection": lost_detection,
+            "terminal_reason": terminal_reason,
+            "position_ok": bool(position_ok),
+            "deck_contact": bool(deck_contact),
+            "landed": bool(landing_detected),
+            "landing_success": bool(success),
+            "visual_height": visual_height,
+            "relative_height": relative_height,
+            "relative_xy_distance": relative_xy_distance,
+            "visual_x": visual_x,
+            "visual_y": visual_y,
+            "rel_vx": rel_vx,
+            "rel_vy": rel_vy,
+            "rel_vz": rel_vz,
+            "rel_xy_speed": rel_xy_speed,
+            "detection_age": detection_age,
+            "xy_threshold": self.landing_xy_threshold,
         }
         return next_state, done, success, info
 
@@ -303,6 +538,11 @@ class GazeboEnv:
 
         # === 修改点 4: Reset 时重置内部标志位，而不是重启进程 ===
         self.yolo_detected = False
+        self._episode_has_detection = False
+        self.drone_linear_velocity = None
+        self.deck_contact = False
+        self._episode_start_time = rospy.Time.now()
+        self.last_yolo_detection_time = self._episode_start_time
         # self.stop_yolo() <-- 已注释
         # self.start_yolo() <-- 已注释
 
@@ -448,8 +688,37 @@ class GazeboEnv:
         return state
 
     def __del__(self):
-        # 只有在最后才会杀掉 YOLO
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self.stop_yolo()
+        self._terminate_process_group("Gazebo", "gazebo_process")
+        self._terminate_process_group("ROS master", "roscore_process")
+
+    def _terminate_process_group(self, label, attribute):
+        process = getattr(self, attribute, None)
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                rospy.loginfo(f"停止{label}进程...")
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            setattr(self, attribute, None)
 
     def get_state(self):
         """
@@ -494,7 +763,10 @@ class GazeboEnv:
 
 
 class Communication:
-    def __init__(self, vehicle_type, vehicle_id):
+    def __init__(self, vehicle_type, vehicle_id,
+                 configure_rc_loss_exception=True,
+                 state_timeout=30.0,
+                 param_timeout=5.0):
         self.vehicle_type = vehicle_type
         self.vehicle_id = vehicle_id
         self.current_position = None
@@ -508,10 +780,26 @@ class Communication:
 
         self.arm_state = False
 
-        mavros_state = rospy.wait_for_message(self.vehicle_type+'_'+self.vehicle_id+"/mavros/state", State)
-        if not mavros_state.connected:
-            rospy.logwarn(self.vehicle_type+'_'+self.vehicle_id+": No connection to FCU. Check mavros!")
-            exit(0)
+        state_topic = self.vehicle_type+'_'+self.vehicle_id+"/mavros/state"
+        rospy.loginfo(f"等待 FCU 状态话题: {state_topic} (timeout={state_timeout:.1f}s)")
+        deadline = time.monotonic() + float(state_timeout)
+        mavros_state = None
+        while time.monotonic() < deadline and not rospy.is_shutdown():
+            remaining = deadline - time.monotonic()
+            try:
+                mavros_state = rospy.wait_for_message(
+                    state_topic, State, timeout=min(1.0, max(remaining, 0.01))
+                )
+            except rospy.ROSException:
+                continue
+            if mavros_state.connected:
+                break
+            rospy.loginfo_throttle(1.0, "已收到 MAVROS 状态，等待 FCU heartbeat...")
+        if mavros_state is None or not mavros_state.connected:
+            raise RuntimeError(
+                f"等待 FCU 连接超时: {state_topic}; 请检查 MAVROS fcu_url 与 PX4 SITL"
+            )
+        rospy.loginfo("FCU 已连接")
 
         self.local_pose_sub = rospy.Subscriber(self.vehicle_type+'_'+self.vehicle_id + "/mavros/local_position/pose",
                                               PoseStamped, self.local_pose_callback, queue_size=1)
@@ -524,13 +812,46 @@ class Communication:
         self.flightModeService = rospy.ServiceProxy(self.vehicle_type+'_'+self.vehicle_id+"/mavros/set_mode", SetMode)
         self.set_param_srv = rospy.ServiceProxy(self.vehicle_type+'_'+self.vehicle_id+"/mavros/param/set", ParamSet)
 
-        rcl_except = ParamValue(4, 0.0)
-        try:
-            self.set_param_srv("COM_RCL_EXCEPT", rcl_except)
-        except Exception:
-            rospy.logwarn("设置 COM_RCL_EXCEPT 失败")
+        if configure_rc_loss_exception:
+            self._configure_rc_loss_exception(float(param_timeout))
+        else:
+            rospy.loginfo("专家采集模式: 跳过 COM_RCL_EXCEPT 参数设置")
 
-        print(self.vehicle_type+'_'+self.vehicle_id+": communication initialized")
+        print(
+            self.vehicle_type+'_'+self.vehicle_id+": communication initialized",
+            flush=True,
+        )
+
+    def _configure_rc_loss_exception(self, timeout):
+        service_name = self.vehicle_type+'_'+self.vehicle_id+"/mavros/param/set"
+        try:
+            rospy.wait_for_service(service_name, timeout=timeout)
+        except rospy.ROSException:
+            rospy.logwarn(
+                f"参数服务 {service_name} 在 {timeout:.1f}s 内不可用，跳过 COM_RCL_EXCEPT"
+            )
+            return
+
+        result = {"error": None}
+
+        def set_parameter():
+            try:
+                self.set_param_srv("COM_RCL_EXCEPT", ParamValue(4, 0.0))
+            except Exception as error:
+                result["error"] = error
+
+        worker = threading.Thread(target=set_parameter)
+        worker.daemon = True
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            rospy.logwarn(
+                f"设置 COM_RCL_EXCEPT 超过 {timeout:.1f}s，继续启动"
+            )
+        elif result["error"] is not None:
+            rospy.logwarn(f"设置 COM_RCL_EXCEPT 失败: {result['error']}")
+        else:
+            rospy.loginfo("COM_RCL_EXCEPT 设置完成")
 
     def start(self):
         rate = rospy.Rate(self.publish_rate)

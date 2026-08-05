@@ -51,7 +51,7 @@ def parse_args():
     p.add_argument("--online_ckpt_dir", type=str, default="", help="save dir for online finetuned checkpoints")
 
     p.add_argument("--env_module", type=str, default="landing_env", choices=["landing_env", "landing_env_listen"], help="which env module to import GazeboEnv from")
-    p.add_argument("--launchfile", type=str, default="/home/wantengyuan/PX4_Firmware/launch/sandisland.launch")
+    p.add_argument("--launchfile", type=str, default="/home/shiro/PX4_Firmware/launch/sandisland.launch")
     p.add_argument("--vehicle_type", type=str, default="iris")
     p.add_argument("--vehicle_id", type=str, default="0")
 

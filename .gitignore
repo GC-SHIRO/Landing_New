@@ -1,40 +1,5 @@
-# Local agent/editor configuration and server-specific instructions
-.agents/
-.claude/
-.codex/
-.vscode/
-AGENTS.md
-CLAUDE.md
-
-# Python and ROS runtime caches
 __pycache__/
 *.py[cod]
-*.bak_codex
-.pytest_cache/
-.mypy_cache/
-.ros/
 
-# Runtime output and potentially sensitive session traces
-recordings/
-*.log
-*.out
-*.err
-*.pid
-*.bag
-*.active
-*.avi
-*.mp4
-
-# TensorBoard event files contain machine-specific runtime metadata.
-checkpoints/**/runs/
-
-# Local environment files and credentials
-.env
-.env.*
-*.pem
-*.key
-id_rsa*
-
-# OS/editor noise
+.claude/settings.local.json
 .DS_Store
-Thumbs.db

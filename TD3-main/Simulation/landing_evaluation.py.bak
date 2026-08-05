@@ -3,12 +3,12 @@
 """
 无人机自主降落评估器 (Simulation 统一版)
 ========================================
-SUCCESS 由在线环境的简化落地检测器决定:
-  相对位置、相对高度和相对速度连续稳定指定时间
+触地瞬间成功判定 + 两维连续打分 (精度 70% / 动力学 30%)。
 
+成功: 相对 marker  herr < 1.0 m 且 verr < 0.5 m
 打分: 仅 SUCCESS 计分; 失败一律 0
-  - 精度 70%: 相对 marker 的 3D 偏差
-  - 动力学 30%: 相对船速度 + 加速度
+  - 精度: 相对 marker 的 3D 偏差
+  - 动力学: 相对船速度 + 加速度
 
 无 ROS 依赖, 可离线重算与单测。
 """
@@ -23,12 +23,17 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
+# ============================================================
+# 数据容器
+# ============================================================
+
 @dataclass
 class EpisodeData:
     """单个 episode 的原始数据, 由评估脚本填充后传入 evaluate()"""
 
     episode_id: int = 0
 
+    # ---- 终点状态 ----
     drone_final_x: float = float("nan")
     drone_final_y: float = float("nan")
     drone_final_z: float = float("nan")
@@ -36,43 +41,46 @@ class EpisodeData:
     target_y: float = float("nan")
     target_z: float = float("nan")
 
+    # ---- 相对船动力学 (触地瞬间) ----
     rel_vx: float = float("nan")
     rel_vy: float = float("nan")
     rel_vz: float = float("nan")
     rel_ax: float = float("nan")
     rel_ay: float = float("nan")
     rel_az: float = float("nan")
+    # 兼容旧字段: 触地垂速 (世界系), 仅作回退
     impact_velocity_z: float = float("nan")
 
+    # ---- 过程统计 ----
     steps: int = 0
     dt: float = 0.1
     init_dist_3d: float = float("nan")
     max_height: float = float("nan")
     max_dist_origin: float = float("nan")
 
+    # ---- 轨迹序列 ----
     actions: List[List[float]] = field(default_factory=list)
     drone_positions: List[Tuple[float, float, float]] = field(default_factory=list)
 
+    # ---- 标记 ----
     crashed: bool = False
     crash_msg: str = ""
     out_of_bounds: bool = False
-    visual_out_of_bounds: bool = False
     max_steps_reached: bool = False
     lost_detection: bool = False
-    landing_success: Optional[bool] = None
-    relative_height: float = float("nan")
-    visual_height: float = float("nan")
-    visual_x: float = float("nan")
-    visual_y: float = float("nan")
-    terminal_reason: str = ""
 
+    # ---- 元信息 ----
     ckpt_dir: str = ""
     load_step: int = 0
     platform_type: str = "dynamic"
 
 
+# ============================================================
+# LandingEvaluation
+# ============================================================
+
 class LandingEvaluation:
-    """降落评估器: 环境稳定降落判定 + 精度/动力学打分。"""
+    """降落评估器: 触地瞬间成功判定 + 精度/动力学两维打分"""
 
     W_ACCURACY = 0.70
     W_DYNAMICS = 0.30
@@ -80,19 +88,25 @@ class LandingEvaluation:
     def __init__(
         self,
         platform_type: str = "dynamic",
-        marker_offset_x: float = -0.20,
-        marker_offset_y: float = 0.0,
+        # 成功边界 (相对 marker)
+        success_herr_thresh: float = 1.0,
+        success_height_thresh: float = 0.5,
+        # 坐标
         marker_offset_z: float = 1.3,
+        # 精度分标度
         err3d_threshold: float = 1.2,
+        # 动力学分标度
         v_rel_max: float = 1.5,
         a_rel_max: float = 5.0,
+        # 越界 (仅记录用, 分类依赖 EpisodeData 标志)
         max_dist: float = 25.0,
         max_height: float = 12.0,
+        # 兼容旧构造参数 (忽略)
         **_legacy_kwargs,
     ):
         self.platform_type = platform_type
-        self.marker_offset_x = float(marker_offset_x)
-        self.marker_offset_y = float(marker_offset_y)
+        self.success_herr_thresh = float(success_herr_thresh)
+        self.success_height_thresh = float(success_height_thresh)
         self.marker_offset_z = float(marker_offset_z)
         self.err3d_threshold = float(err3d_threshold)
         self.v_rel_max = float(v_rel_max)
@@ -100,17 +114,20 @@ class LandingEvaluation:
         self.max_dist = float(max_dist)
         self.max_height = float(max_height)
 
+    # -------- 分类 --------
+
     def classify(self, data: EpisodeData) -> str:
+        """结果标签。SUCCESS 优先于 MAX_STEPS。"""
         if data.crashed:
             return "CRASHED"
-        if self._is_landing_success(data):
-            return "SUCCESS"
-        if data.visual_out_of_bounds or data.terminal_reason == "YOLO_OUT_OF_BOUNDS":
-            return "YOLO_OUT_OF_BOUNDS"
         if data.out_of_bounds:
             return "OUT_OF_BOUNDS"
         if data.lost_detection:
             return "LOST_DETECTION"
+
+        if self._is_position_success(data):
+            return "SUCCESS"
+
         if data.max_steps_reached:
             return "MAX_STEPS"
         return "MISSED"
@@ -118,16 +135,27 @@ class LandingEvaluation:
     def is_success(self, result: str) -> bool:
         return result == "SUCCESS"
 
-    def _is_landing_success(self, data: EpisodeData) -> bool:
-        return data.landing_success is True
+    def _is_position_success(self, data: EpisodeData) -> bool:
+        herr = self._horiz_err(data)
+        verr = self._vert_err(data)
+        if not (np.isfinite(herr) and np.isfinite(verr)):
+            return False
+        return (
+            herr < self.success_herr_thresh
+            and verr < self.success_height_thresh
+        )
+
+    # -------- 两维评分 --------
 
     def score_accuracy(self, data: EpisodeData) -> float:
+        """相对 marker 的 3D 偏差 → 0~100"""
         err_3d = self._err_3d(data)
         if not np.isfinite(err_3d) or self.err3d_threshold <= 0:
             return 0.0
         return 100.0 * max(0.0, 1.0 - err_3d / self.err3d_threshold)
 
     def score_dynamics(self, data: EpisodeData) -> float:
+        """相对船速度 + 加速度 → 0~100 (各 50%)"""
         v = self._rel_speed(data)
         a = self._rel_accel(data)
         s_v = 0.0
@@ -136,6 +164,7 @@ class LandingEvaluation:
             s_v = 100.0 * max(0.0, 1.0 - abs(v) / self.v_rel_max)
         if np.isfinite(a) and self.a_rel_max > 0:
             s_a = 100.0 * max(0.0, 1.0 - abs(a) / self.a_rel_max)
+        # 若加速度缺失, 仅用速度; 若速度缺失, 仅用加速度; 都缺则 0
         if np.isfinite(v) and np.isfinite(a):
             return 0.5 * s_v + 0.5 * s_a
         if np.isfinite(v):
@@ -159,9 +188,12 @@ class LandingEvaluation:
             return "D"
         return "F"
 
+    # -------- 主入口 --------
+
     def evaluate(self, data: EpisodeData) -> Dict[str, Any]:
         result = self.classify(data)
         is_succ = self.is_success(result)
+
         if is_succ:
             s_acc = self.score_accuracy(data)
             s_dyn = self.score_dynamics(data)
@@ -173,23 +205,23 @@ class LandingEvaluation:
 
         herr = self._horiz_err(data)
         verr = self._vert_err(data)
-        dz = self._signed_vert(data)
         err3d = self._err_3d(data)
         rel_speed = self._rel_speed(data)
         rel_accel = self._rel_accel(data)
-        vxy = self._rel_vxy(data)
-        vz_abs = self._rel_vz_abs(data)
 
         return {
             "Episode": data.episode_id,
             "Result": result,
             "CompositeScore": total,
             "Rating": grade,
+
             "Score_Accuracy": s_acc,
             "Score_Dynamics": s_dyn,
+            # 兼容旧字段名 (效率/平滑/安全本轮不使用)
             "Score_Efficiency": 0.0,
             "Score_Smoothness": 0.0,
             "Score_Safety": 0.0,
+
             "FinalX": data.drone_final_x,
             "FinalY": data.drone_final_y,
             "FinalZ": data.drone_final_z,
@@ -198,36 +230,33 @@ class LandingEvaluation:
             "TargetZ": data.target_z,
             "HorizErr": herr,
             "VertErr": verr,
-            "SignedDz": dz,
             "Err3D": err3d,
+
             "RelSpeed": rel_speed,
             "RelAccel": rel_accel,
-            "RelVxy": vxy,
-            "RelVzAbs": vz_abs,
             "RelVx": data.rel_vx,
             "RelVy": data.rel_vy,
             "RelVz": data.rel_vz,
             "ImpactVelocityZ": data.impact_velocity_z,
+
             "Steps": data.steps,
             "TimeSec": data.steps * data.dt,
             "InitDist3D": data.init_dist_3d,
             "MaxHeight": data.max_height,
             "MaxDistOrigin": data.max_dist_origin,
-            "LandingSuccess": data.landing_success,
-            "RelativeHeight": data.relative_height,
-            "VisualHeight": data.visual_height,
-            "VisualX": data.visual_x,
-            "VisualY": data.visual_y,
-            "VisualOutOfBounds": data.visual_out_of_bounds,
-            "TerminalReason": data.terminal_reason,
+
             "ErrorMsg": data.crash_msg,
             "CkptDir": data.ckpt_dir or "",
             "LoadStep": data.load_step,
             "Dt": data.dt,
             "MaxSteps": 0,
             "PlatformType": data.platform_type,
+            "SuccessHerrThresh": self.success_herr_thresh,
+            "SuccessHeightThresh": self.success_height_thresh,
             "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
         }
+
+    # -------- 汇总 --------
 
     def summarize(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
         n = len(records)
@@ -237,19 +266,24 @@ class LandingEvaluation:
         def _count(name: str) -> int:
             return sum(1 for r in records if str(r.get("Result", "")) == name)
 
-        n_reset = sum(1 for r in records if str(r.get("Result", "")).startswith("RESET"))
+        n_reset = sum(
+            1 for r in records if str(r.get("Result", "")).startswith("RESET")
+        )
         n_crashed = _count("CRASHED")
         n_oob = _count("OUT_OF_BOUNDS")
-        n_visual_oob = _count("YOLO_OUT_OF_BOUNDS")
         n_lost = _count("LOST_DETECTION")
         n_max = _count("MAX_STEPS")
         n_missed = _count("MISSED")
         n_success = _count("SUCCESS")
-        n_aborted = n_oob + n_visual_oob + n_lost + n_max
+        n_aborted = n_oob + n_lost + n_max
         n_landed_like = n_success + n_missed
 
-        def _mean_std(key: str):
-            vals = [float(r[key]) for r in records if key in r and np.isfinite(float(r[key]))]
+        def _mean_std(key: str) -> Tuple[float, float]:
+            vals = [
+                float(r[key])
+                for r in records
+                if key in r and np.isfinite(float(r[key]))
+            ]
             if not vals:
                 return float("nan"), float("nan")
             return float(np.mean(vals)), float(np.std(vals))
@@ -268,14 +302,13 @@ class LandingEvaluation:
             "N_CRASHED": n_crashed,
             "N_ABORTED": n_aborted,
             "N_OUT_OF_BOUNDS": n_oob,
-            "N_YOLO_OUT_OF_BOUNDS": n_visual_oob,
             "N_LOST_DETECTION": n_lost,
             "N_MAX_STEPS": n_max,
             "N_MISSED": n_missed,
             "N_SUCCESS": n_success,
             "N_PERFECT": 0,
             "N_GOOD": 0,
-            "N_ACCEPTABLE": n_success,
+            "N_ACCEPTABLE": n_success,  # 兼容旧打印字段
             "N_LANDED": n_landed_like,
             "SR": 100.0 * n_success / max(n, 1),
             "SR_usable": 100.0 * n_success / max(n_landed_like, 1),
@@ -290,6 +323,8 @@ class LandingEvaluation:
             "Mean_RelAccel": m_arel,
         }
 
+    # -------- 内部工具 --------
+
     def _horiz_err(self, data: EpisodeData) -> float:
         dx = data.drone_final_x - data.target_x
         dy = data.drone_final_y - data.target_y
@@ -297,16 +332,10 @@ class LandingEvaluation:
             return float("nan")
         return float(np.sqrt(dx ** 2 + dy ** 2))
 
-    def _signed_vert(self, data: EpisodeData) -> float:
+    def _vert_err(self, data: EpisodeData) -> float:
         if not np.isfinite(data.drone_final_z) or not np.isfinite(data.target_z):
             return float("nan")
-        return float(data.drone_final_z - data.target_z)
-
-    def _vert_err(self, data: EpisodeData) -> float:
-        dz = self._signed_vert(data)
-        if not np.isfinite(dz):
-            return float("nan")
-        return float(abs(dz))
+        return float(abs(data.drone_final_z - data.target_z))
 
     def _err_3d(self, data: EpisodeData) -> float:
         herr = self._horiz_err(data)
@@ -315,22 +344,11 @@ class LandingEvaluation:
             return float("nan")
         return float(np.sqrt(herr ** 2 + verr ** 2))
 
-    def _rel_vxy(self, data: EpisodeData) -> float:
-        if np.isfinite(data.rel_vx) and np.isfinite(data.rel_vy):
-            return float(np.sqrt(data.rel_vx ** 2 + data.rel_vy ** 2))
-        return float("nan")
-
-    def _rel_vz_abs(self, data: EpisodeData) -> float:
-        if np.isfinite(data.rel_vz):
-            return float(abs(data.rel_vz))
-        if np.isfinite(data.impact_velocity_z):
-            return float(abs(data.impact_velocity_z))
-        return float("nan")
-
     def _rel_speed(self, data: EpisodeData) -> float:
         comps = [data.rel_vx, data.rel_vy, data.rel_vz]
         if all(np.isfinite(c) for c in comps):
             return float(np.sqrt(sum(c ** 2 for c in comps)))
+        # 回退: 仅用 impact_velocity_z 作为 |vz|
         if np.isfinite(data.impact_velocity_z):
             return float(abs(data.impact_velocity_z))
         return float("nan")
@@ -342,34 +360,41 @@ class LandingEvaluation:
         return float("nan")
 
 
+# ============================================================
+# 便捷函数
+# ============================================================
+
 def compute_dynamic_target(
-    ship_x,
-    ship_y,
-    ship_z,
-    ship_yaw=0.0,
-    marker_offset_x=-0.20,
-    marker_offset_y=0.0,
-    marker_offset_z=1.3,
-):
-    cos_yaw = np.cos(ship_yaw)
-    sin_yaw = np.sin(ship_yaw)
-    world_offset_x = cos_yaw * marker_offset_x - sin_yaw * marker_offset_y
-    world_offset_y = sin_yaw * marker_offset_x + cos_yaw * marker_offset_y
+    ship_x: float,
+    ship_y: float,
+    ship_z: float,
+    marker_offset_z: float = 1.3,
+) -> Tuple[float, float, float]:
+    """船 base_link + marker 高度偏移 → 世界系目标点"""
+    return (ship_x, ship_y, ship_z + marker_offset_z)
+
+
+def estimate_velocity_from_positions(
+    positions: List[Tuple[float, float, float]],
+    dt: float,
+) -> Tuple[float, float, float]:
+    """用末两帧位置差分估计速度; 不足则 NaN"""
+    if len(positions) < 2 or dt <= 0:
+        return (float("nan"), float("nan"), float("nan"))
+    p1 = positions[-1]
+    p0 = positions[-2]
     return (
-        ship_x + world_offset_x,
-        ship_y + world_offset_y,
-        ship_z + marker_offset_z,
+        (p1[0] - p0[0]) / dt,
+        (p1[1] - p0[1]) / dt,
+        (p1[2] - p0[2]) / dt,
     )
 
 
-def estimate_velocity_from_positions(positions, dt):
-    if len(positions) < 2 or dt <= 0:
-        return (float("nan"), float("nan"), float("nan"))
-    p1, p0 = positions[-1], positions[-2]
-    return ((p1[0]-p0[0])/dt, (p1[1]-p0[1])/dt, (p1[2]-p0[2])/dt)
-
-
-def estimate_accel_from_positions(positions, dt):
+def estimate_accel_from_positions(
+    positions: List[Tuple[float, float, float]],
+    dt: float,
+) -> Tuple[float, float, float]:
+    """用末三帧位置二阶差分估计加速度; 不足则 NaN"""
     if len(positions) < 3 or dt <= 0:
         return (float("nan"), float("nan"), float("nan"))
     p2 = np.asarray(positions[-1], dtype=np.float64)
@@ -382,18 +407,31 @@ def estimate_accel_from_positions(positions, dt):
 
 
 def build_relative_dynamics(
-    drone_vx, drone_vy, drone_vz,
-    ship_vx, ship_vy, ship_vz=0.0,
-    drone_ax=float("nan"), drone_ay=float("nan"), drone_az=float("nan"),
-    ship_ax=0.0, ship_ay=0.0, ship_az=0.0,
-):
+    drone_vx: float,
+    drone_vy: float,
+    drone_vz: float,
+    ship_vx: float,
+    ship_vy: float,
+    ship_vz: float = 0.0,
+    drone_ax: float = float("nan"),
+    drone_ay: float = float("nan"),
+    drone_az: float = float("nan"),
+    ship_ax: float = 0.0,
+    ship_ay: float = 0.0,
+    ship_az: float = 0.0,
+) -> Dict[str, float]:
+    """构造相对船的速度/加速度分量"""
     rel_vx = drone_vx - ship_vx if np.isfinite(drone_vx) and np.isfinite(ship_vx) else float("nan")
     rel_vy = drone_vy - ship_vy if np.isfinite(drone_vy) and np.isfinite(ship_vy) else float("nan")
     rel_vz = drone_vz - ship_vz if np.isfinite(drone_vz) and np.isfinite(ship_vz) else float("nan")
+
     if all(np.isfinite(c) for c in (drone_ax, drone_ay, drone_az)):
-        rel_ax, rel_ay, rel_az = drone_ax - ship_ax, drone_ay - ship_ay, drone_az - ship_az
+        rel_ax = drone_ax - ship_ax
+        rel_ay = drone_ay - ship_ay
+        rel_az = drone_az - ship_az
     else:
         rel_ax = rel_ay = rel_az = float("nan")
+
     return {
         "rel_vx": float(rel_vx) if np.isfinite(rel_vx) else float("nan"),
         "rel_vy": float(rel_vy) if np.isfinite(rel_vy) else float("nan"),
@@ -407,50 +445,44 @@ def build_relative_dynamics(
 if __name__ == "__main__":
     evaluator = LandingEvaluation(platform_type="dynamic")
 
+    # 成功: 近中心、低相对速度
     ok = EpisodeData(
         episode_id=1,
-        drone_final_x=10.1, drone_final_y=5.05, drone_final_z=1.43,
+        drone_final_x=10.1, drone_final_y=5.05, drone_final_z=1.45,
         target_x=10.0, target_y=5.0, target_z=1.4,
-        rel_vx=0.05, rel_vy=0.0, rel_vz=0.05,
+        rel_vx=0.05, rel_vy=0.0, rel_vz=0.1,
         rel_ax=0.1, rel_ay=0.0, rel_az=0.2,
-        landing_success=True, visual_height=0.20,
         steps=100, dt=0.1, platform_type="dynamic",
     )
     r = evaluator.evaluate(ok)
     assert r["Result"] == "SUCCESS", r
     assert r["CompositeScore"] > 0, r
-    print(f"OK SUCCESS score={r['CompositeScore']:.1f}")
+    print(f"OK SUCCESS score={r['CompositeScore']:.1f} acc={r['Score_Accuracy']:.1f} dyn={r['Score_Dynamics']:.1f}")
 
-    high = EpisodeData(
+    # 失败: 水平偏大
+    miss = EpisodeData(
         episode_id=2,
-        drone_final_x=10.1, drone_final_y=5.0, drone_final_z=1.8,
+        drone_final_x=12.0, drone_final_y=5.0, drone_final_z=1.4,
         target_x=10.0, target_y=5.0, target_z=1.4,
         rel_vx=0.0, rel_vy=0.0, rel_vz=0.0,
-        landing_success=False, visual_height=0.8, steps=50, dt=0.1,
-    )
-    r2 = evaluator.evaluate(high)
-    assert r2["Result"] == "MISSED", r2
-    print("OK non-landing episode MISSED")
-
-    visual_only = EpisodeData(
-        episode_id=3,
-        visual_height=0.20,
         steps=50, dt=0.1,
     )
-    r3 = evaluator.evaluate(visual_only)
-    assert r3["Result"] == "MISSED", r3
-    print("OK visual observation alone is not SUCCESS")
+    r2 = evaluator.evaluate(miss)
+    assert r2["Result"] == "MISSED", r2
+    assert r2["CompositeScore"] == 0.0, r2
+    print(f"OK MISSED score={r2['CompositeScore']:.1f}")
 
-    visual_oob = EpisodeData(
-        episode_id=4,
-        visual_height=1.0,
-        visual_x=8.1,
-        visual_out_of_bounds=True,
-        terminal_reason="YOLO_OUT_OF_BOUNDS",
-        steps=10,
-        dt=0.1,
+    # 满步但位置成功 → SUCCESS
+    ms = EpisodeData(
+        episode_id=3,
+        drone_final_x=10.2, drone_final_y=5.1, drone_final_z=1.5,
+        target_x=10.0, target_y=5.0, target_z=1.4,
+        rel_vx=0.1, rel_vy=0.0, rel_vz=0.2,
+        rel_ax=0.0, rel_ay=0.0, rel_az=0.0,
+        max_steps_reached=True, steps=600, dt=0.1,
     )
-    r4 = evaluator.evaluate(visual_oob)
-    assert r4["Result"] == "YOLO_OUT_OF_BOUNDS", r4
-    print("OK visual out-of-bounds failure")
+    r3 = evaluator.evaluate(ms)
+    assert r3["Result"] == "SUCCESS", r3
+    print(f"OK max_steps+position SUCCESS score={r3['CompositeScore']:.1f}")
+
     print("self-check passed")

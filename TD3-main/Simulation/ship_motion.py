@@ -16,12 +16,17 @@ from gazebo_msgs.msg import ModelState, ModelStates
 
 
 class ShipMotionController:
-    def __init__(self, ship_name="wamv", init_pos=(10, 5),
+    def __init__(self, ship_name="wamv", init_pos=(10, 5), init_z=0.0,
                  kp=0.2, max_speed=None):
         self.ship_name = ship_name
         self.init_pos = np.array(init_pos, dtype=np.float64)
+        self.init_z = float(init_z)
         self.kp = float(kp)
-        self.max_speed = max_speed
+        # A supplied value is a hard safety cap.  Previously _ensure_max_speed
+        # could raise an explicitly requested cap while compensating tracking
+        # error, which made a "1 m/s" scenario publish faster commands.
+        self.max_speed = None if max_speed is None else float(max_speed)
+        self._hard_max_speed = max_speed is not None
 
         self._set_state_pub = rospy.Publisher("/gazebo/set_model_state", ModelState, queue_size=1)
         self._model_sub = rospy.Subscriber("/gazebo/model_states", ModelStates,
@@ -57,6 +62,8 @@ class ShipMotionController:
 
         self._pos = self.init_pos.copy()
         self._vel = np.zeros(2, dtype=np.float64)
+        self._z = self.init_z
+        self._vz = 0.0
         self._yaw = 0.0
         self._pose = None
         self._received_model_state = False
@@ -145,6 +152,8 @@ class ShipMotionController:
     def teleport_to_origin(self):
         self._pos = self.init_pos.copy()
         self._vel = np.zeros(2, dtype=np.float64)
+        self._z = self.init_z
+        self._vz = 0.0
         self._yaw = 0.0
         self._last_cmd = np.zeros(2, dtype=np.float64)
         self._ref_pos = self.init_pos.copy()
@@ -155,7 +164,7 @@ class ShipMotionController:
         msg.reference_frame = "world"
         msg.pose.position.x = float(self.init_pos[0])
         msg.pose.position.y = float(self.init_pos[1])
-        msg.pose.position.z = 0.0
+        msg.pose.position.z = self.init_z
         msg.pose.orientation.w = 1.0
         self._pose = msg.pose
         self._set_state_pub.publish(msg)
@@ -164,10 +173,35 @@ class ShipMotionController:
     def get_current_pos(self):
         return self._pos.copy()
 
+    def get_landing_target(
+        self,
+        marker_offset_z,
+        marker_offset_x=0.0,
+        marker_offset_y=0.0,
+    ):
+        cos_yaw = math.cos(self._yaw)
+        sin_yaw = math.sin(self._yaw)
+        world_offset_x = cos_yaw * marker_offset_x - sin_yaw * marker_offset_y
+        world_offset_y = sin_yaw * marker_offset_x + cos_yaw * marker_offset_y
+        return (
+            float(self._pos[0] + world_offset_x),
+            float(self._pos[1] + world_offset_y),
+            float(self._z + marker_offset_z),
+        )
+
+    def get_landing_velocity(self):
+        return (
+            float(self._vel[0]),
+            float(self._vel[1]),
+            float(self._vz),
+        )
+
     def get_state(self):
         return {
             "pos": self._pos.copy(),
             "vel": self._vel.copy(),
+            "pos_z": float(self._z),
+            "vel_z": float(self._vz),
             "cmd_vel": self._last_cmd.copy(),
             "speed": float(np.linalg.norm(self._vel)),
             "cmd_speed": float(np.linalg.norm(self._last_cmd)),
@@ -212,6 +246,8 @@ class ShipMotionController:
         self._pos[1] = pose.position.y
         self._vel[0] = twist.linear.x
         self._vel[1] = twist.linear.y
+        self._z = pose.position.z
+        self._vz = twist.linear.z
         self._yaw = self._yaw_from_orientation(pose.orientation)
         self._received_model_state = True
 
@@ -363,6 +399,8 @@ class ShipMotionController:
         return self._scale_velocity(base_vel, speed)
 
     def _ensure_max_speed(self, nominal_speed=None):
+        if self._hard_max_speed:
+            return
         if nominal_speed is None:
             nominal_speed = float(np.linalg.norm(self._target_vel))
         needed = max(0.5, 2.0 * float(nominal_speed))
@@ -372,7 +410,7 @@ class ShipMotionController:
         msg = ModelState()
         msg.pose.position.x = float(self.init_pos[0])
         msg.pose.position.y = float(self.init_pos[1])
-        msg.pose.position.z = 0.0
+        msg.pose.position.z = self.init_z
         msg.pose.orientation.w = 1.0
         return msg.pose
 

@@ -50,7 +50,7 @@ args = parser.parse_args()
 # ==========================================
 # 1. 设置保存路径
 # ==========================================
-save_dir = '/home/wantengyuan/work/Landing_new'
+save_dir = '/home/shiro/work/Landing_new'
 if not os.path.exists(save_dir):
     try:
         os.makedirs(save_dir)
@@ -64,7 +64,7 @@ expert_data_file = os.path.join(save_dir, 'expert_data_lstm_left_up.json')
 
 def main():
     # 初始化环境
-    env = GazeboEnv("/home/wantengyuan/PX4_Firmware/launch/sandisland.launch", "iris", '0')
+    env = GazeboEnv("/home/shiro/PX4_Firmware/launch/sandisland.launch", "iris", '0')
     
     # 初始化 Agent (占位用，即使不训练也需要初始化参数)
     agent = TD3(args.state_dim, args.action_dim, args.max_action, args.capacity, args)
