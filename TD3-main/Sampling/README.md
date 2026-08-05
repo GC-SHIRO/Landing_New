@@ -39,19 +39,19 @@ expert_data_dynamic/step1_privileged_pd_all.jsonl
 observation, action, reward, next_observation, done
 ```
 
-### 奖励（与 Simulation 对齐，Sampling 内本地复刻）
+### 奖励（与 Simulation 动态落地判定对齐，Sampling 内本地复刻）
 
-`reward` 由 `Sampling/privileged_pd_expert.compute_transition_reward` 生成，公式与
-`Simulation/env_base.GazeboEnv.reward_setup` 一致，但**不 import Simulation**，避免 ROS 耦合：
+`reward` 由 `Sampling/privileged_pd_expert.compute_transition_reward` 生成，**不 import Simulation**，避免 ROS 耦合：
 
 - 非终止：视觉 L3 shaping  
   `0.1 * -(|x|^3 + |y|^3 + |z|^3)^(1/3)`，使用**步进前** `observation`
-- 终止：若 `success` 且世界系位置落在  
-  `-2.5 < x < -1.5` 且 `-2.5 < y < -1.5` → `+300`，否则 `-200`  
-  （世界坐标取步进后无人机真值，对应 env_base 读 `current_position`）
+- 终止：成功判定与 `Simulation/env_base.step()` 的权威落地判定一致  
+  `landing_success = deck_contact AND relative_xy_distance <= landing_xy_threshold`
+  - 使用**相对甲板水平距离**（`relative_xy_distance`，步进后无人机与甲板目标的世界系水平距离），而非旧静态世界框 `(-2.5,-1.5)^2`
+  - `success=True` 且相对距离 ≤ 阈值 → `+300`，否则 `-200`
+  - 未传入距离时直接信任 `success` 标志（env 已按相对甲板 + 接触判定）
 
-注意：该成功框来自旧静态 pad 逻辑；动态甲板上即使 `landing_success=True`，
-世界坐标也可能不在框内，从而得到 `-200`。这是与当前 Simulation 行为对齐的结果。
+注意：旧版曾用静态世界框，动态甲板上成功落点常远离该框而误判 `-200`，已改为相对甲板判定。
 
 额外保存 `privileged_state`、`expert`、`scenario` 和 `env_info`，这些字段用于调参与
 失败分析，不会被当前离线训练数据读取器使用。
@@ -166,9 +166,26 @@ Step2–4 应在 Step1 成功率和接触速度稳定后逐级启用，不建议
 
 ## 随机 Step0-4 采集
 
-`random_dynamic_expert.py` 用于生成覆盖静止、直线、变速直线、曲线和变速曲线的
-混合专家数据。默认采集 300 个回合，并以分层随机方式保证 Step0-4 各有 60 个回合；
-每个回合的方向、轨迹形状和速度独立随机，固定 `--seed` 时可复现。
+`random_dynamic_expert.py` 用于生成覆盖 7 类运动的混合专家数据：
+
+| 类别 | 对应 Step | 说明 |
+|------|-----------|------|
+| `static` | 0 | 静止甲板 |
+| `line_constant` | 1 | 直线匀速 |
+| `line_varspeed` | 2 | 直线变速 |
+| `sine_constant` | 3 | 正弦曲线匀速 |
+| `sine_varspeed` | 4 | 正弦曲线变速 |
+| `circle_constant` | 3 | 圆圈匀速 |
+| `circle_varspeed` | 4 | 圆圈变速 |
+
+- **停止条件**：默认直到**保存满 300 条有效回合**才停止（`--target_saved`），
+  而不是按尝试次数；每条保存仍要求成功落地且通过质量门控。
+- **均匀分布**：每局从“已保存最少”的类别中随机挑选（失败/被拒不计入），
+  因此最终 7 类各约 1/7（300 条时各 42–43 条），避免前期某类扎堆。
+- **安全上限**：`--max_attempts`（默认 1500）防止某类长期采不到时无限运行；
+  触达上限会保留现有数据并打印警告。
+- **速度随机**：每局方向、速度（或速度区间）、曲线几何参数独立随机，
+  固定 `--seed` 时可复现；`--episodes` 作为 `--target_saved` 的废弃别名兼容。
 
 ```bash
 python TD3-main/Sampling/random_dynamic_expert.py

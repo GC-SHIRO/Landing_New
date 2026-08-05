@@ -303,20 +303,37 @@ def compute_transition_reward(
     world_x: float,
     world_y: float,
     next_observation: Optional[Sequence[float]] = None,
+    relative_xy_distance: Optional[float] = None,
+    landing_xy_threshold: Optional[float] = None,
 ) -> float:
-    """生成与 Simulation/env_base.reward_setup 对齐的逐步奖励。
+    """生成与 Simulation 动态落地判定对齐的逐步奖励。
 
-    这里是 Simulation 公式的本地副本，避免 Sampling 依赖 ROS/Gazebo 导入。
+    稠密项与 env_base.reward_setup 的视觉 L3 shaping 一致。
+    终止项判定与 Simulation/env_base.step() 的权威落地判定一致：
+        landing_success = deck_contact AND relative_xy_distance <= landing_xy_threshold
+    （relative_xy_distance 是相对甲板的水平距离，非世界系固定坐标。）
+
+    旧版成功判定使用静态世界框 (-2.5,-1.5)^2，动态甲板下成功落点常远离该框，
+    导致 success=True 也被判为失败奖励 -200。此处改为相对甲板判定：
+    - 传入 relative_xy_distance + landing_xy_threshold 时，与 env.step() 的
+      position_ok 完全同式；
+    - 不传时直接信任 success 标志（env 已按相对甲板 + deck_contact 判定）。
+
     调用方应传入：
     - observation：步进前视觉观测（与 env_base 一致）
-    - world_x/world_y：步进后无人机世界坐标
-      （env_base 在 step 后读取 self.comm.current_position）
+    - world_x/world_y：步进后无人机世界坐标（仅为接口对称保留，不再参与判定）
+    - relative_xy_distance：步进后无人机相对甲板的水平距离
+    - landing_xy_threshold：env 的 landing_xy_threshold（默认 1.5）
     - next_observation：仅为与 env_base 接口对称保留，实际不使用
     """
     del next_observation  # env_base 也接收该参数，但未使用
     reward = _simulation_l3_shaping(observation)
     if not done:
         return float(reward)
-    if bool(success) and _in_simulation_success_box(world_x, world_y):
+    if bool(success):
+        if relative_xy_distance is not None and landing_xy_threshold is not None:
+            if float(relative_xy_distance) <= float(landing_xy_threshold):
+                return float(SIM_SUCCESS_REWARD)
+            return float(SIM_FAIL_REWARD)
         return float(SIM_SUCCESS_REWARD)
     return float(SIM_FAIL_REWARD)

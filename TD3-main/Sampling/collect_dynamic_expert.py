@@ -395,6 +395,13 @@ def sample_is_usable(
     if np.any(np.abs(action) > MAX_SPEED + 1e-6):
         return False, repeat_count, "action_limit", True
 
+    # 触地成功终止帧（env 的 landing_success = deck_contact AND rel_xy<=threshold）：
+    # 必须保留为训练终止转移。触地瞬间 YOLO 冻结/视觉退化是预期行为，若在此
+    # 裁剪，成功回合的终末 step 会丢失 success 标志与 +300 终止奖励。
+    # 结构性错误（shape/non_finite/action_limit）仍在上方 fatal 拒绝。
+    if bool(info.get("landing_success", False)):
+        return True, repeat_count, "", False
+
     detection_fresh = bool(info.get("detection_fresh", info.get("tag_detected", False)))
     visual_xy = np.abs(next_observation[:2])
     visual_z = float(next_observation[2])
@@ -600,14 +607,18 @@ def main() -> None:
                     if reached_limit and not env_done:
                         terminal_reason = "MAX_STEPS"
 
-                    # 与 Simulation/env_base.reward_setup 对齐（本地复刻，不 import）：
-                    # 稠密项用步进前视觉观测；终止项用步进后世界系 xy + success。
+                    # 与 Simulation/env_base.step() 的动态落地判定对齐（本地复刻，不 import）：
+                    # 稠密项用步进前视觉观测；终止项成功判定与 env 的
+                    # landing_success = deck_contact AND rel_xy<=threshold 一致，
+                    # 使用相对甲板水平误差（horizontal_error），而非旧静态世界框。
                     reward = compute_transition_reward(
                         observation=observation,
                         done=done,
                         success=success,
                         world_x=float(truth_after[0][0]),
                         world_y=float(truth_after[0][1]),
+                        relative_xy_distance=horizontal_error,
+                        landing_xy_threshold=env.landing_xy_threshold,
                         next_observation=next_observation,
                     )
                     quality_info = dict(info)
@@ -639,6 +650,7 @@ def main() -> None:
                         "next_privileged_state": truth_metadata(*truth_after),
                         "env_info": {
                             "deck_contact": bool(info.get("deck_contact", False)),
+                            "landing_success": bool(success),
                             "relative_xy_distance": float(
                                 info.get("relative_xy_distance", horizontal_error)
                             ),
