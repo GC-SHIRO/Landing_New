@@ -83,8 +83,8 @@ class Args:
     capacity: int = 200_000
 
     # io
-    data_path: str = "/home/shiro/Landing_new/expert_data_dynamic/random_dynamic_privileged_pd.jsonl"
-    ckpt_dir: str = "/home/shiro/Landing_new/checkpoints/TD3/random_dynamic"
+    data_path: str = "/home/shiro/Landing_new/expert_data_lstm.json"
+    ckpt_dir: str = "/home/shiro/Landing_new/checkpoints/TD3/LSTM1"
     save_every: int = 10000
     log_every: int = 61
     seed: int = 1

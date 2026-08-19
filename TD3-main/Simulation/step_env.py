@@ -131,7 +131,7 @@ def main():
 
     # ---- 模型加载 ----
     parser.add_argument('--ckpt_dir', type=str,
-                        default='/home/shiro/Landing_new/checkpoints/TD3/random_dynamic',
+                        default='/home/shiro/Landing_new/checkpoints/TD3/LSTM1',
                         help='模型权重目录')
     parser.add_argument('--load_step', type=int, default=100000,
                         help='加载步数')

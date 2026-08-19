@@ -1,15 +1,5 @@
-"""动态场景专家采样工具。"""
+"""全局真值专家采样工具。"""
 
-from Sampling.privileged_pd_expert import (
-    ExpertCommand,
-    PrivilegedPDConfig,
-    PrivilegedPDExpert,
-    compute_transition_reward,
-)
+from Sampling.global_expert import ExpertCommand, ExpertConfig, GlobalLandingExpert
 
-__all__ = [
-    "ExpertCommand",
-    "PrivilegedPDConfig",
-    "PrivilegedPDExpert",
-    "compute_transition_reward",
-]
+__all__ = ["ExpertCommand", "ExpertConfig", "GlobalLandingExpert"]
