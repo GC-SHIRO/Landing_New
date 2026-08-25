@@ -4,3 +4,5 @@ __pycache__/
 .claude/settings.local.json
 .DS_Store
 expert_data_dynamic/*.jsonl
+/checkpoints/
+*.pre_10d_backup

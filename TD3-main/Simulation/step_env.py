@@ -134,7 +134,7 @@ def main():
     parser.add_argument('--ckpt_dir', type=str,
                         default='/home/shiro/Landing_new/checkpoints/TD3/LSTM1',
                         help='模型权重目录')
-    parser.add_argument('--load_step', type=int, default=100000,
+    parser.add_argument('--load_step', type=int, default=60000,
                         help='加载步数')
     parser.add_argument('--state_dim', type=int, default=10)
     parser.add_argument('--action_dim', type=int, default=3)
