@@ -16,14 +16,34 @@ from Sampling.validate_expert_data import validate_dataset
 def _valid_episode(length=72):
     episode = []
     for index in range(length):
-        observation = np.array(
-            [0.01 * index, -0.02 * index, 8.0 - 0.05 * index],
-            dtype=np.float32,
-        )
-        next_observation = np.array(
-            [0.01 * (index + 1), -0.02 * (index + 1), 8.0 - 0.05 * (index + 1)],
-            dtype=np.float32,
-        )
+        def state(step_index):
+            position = [
+                0.01 * step_index + 0.0001 * step_index ** 2,
+                -0.02 * step_index + 0.00005 * step_index ** 2,
+                8.0 - 0.05 * step_index + 0.00002 * step_index ** 2,
+            ]
+            if step_index == 0:
+                velocity = [0.0, 0.0, 0.0]
+            else:
+                previous = np.array([
+                    0.01 * (step_index - 1) + 0.0001 * (step_index - 1) ** 2,
+                    -0.02 * (step_index - 1) + 0.00005 * (step_index - 1) ** 2,
+                    8.0 - 0.05 * (step_index - 1) + 0.00002 * (step_index - 1) ** 2,
+                ])
+                velocity = ((np.array(position) - previous) / 0.1).tolist()
+            acceleration = [0.0, 0.0, 0.0] if step_index < 2 else [0.02, 0.01, 0.004]
+            return np.array(
+                [
+                    *position,
+                    *velocity,
+                    *acceleration,
+                    0.8 + 0.001 * step_index,
+                ],
+                dtype=np.float32,
+            )
+
+        observation = state(index)
+        next_observation = state(index + 1)
         episode.append(
             {
                 "observation": observation.tolist(),
@@ -54,7 +74,7 @@ class DatasetContinuityTests(unittest.TestCase):
     def test_broken_next_observation_is_rejected(self):
         """相邻状态链断裂必须被检查出来。"""
         episode = _valid_episode()
-        episode[8]["next_observation"] = [99.0, 99.0, 99.0]
+        episode[8]["next_observation"] = [99.0] * 10
         errors, _ = validate_dataset([episode])
         self.assertTrue(any("链断裂" in error for error in errors))
 
@@ -62,11 +82,12 @@ class DatasetContinuityTests(unittest.TestCase):
         """失检 SEARCH 帧应保持 observation、水平动作并使用正 z。"""
         episode = _valid_episode()
         index = 10
-        episode[index]["observation"] = list(episode[index - 1]["observation"])
+        lost_observation = list(episode[index - 1]["observation"][:3]) + [0.0] * 7
+        episode[index]["observation"] = lost_observation
         episode[index - 1]["next_observation"] = list(
             episode[index]["observation"]
         )
-        episode[index]["next_observation"] = list(episode[index]["observation"])
+        episode[index]["next_observation"] = list(lost_observation)
         episode[index + 1]["observation"] = list(
             episode[index]["next_observation"]
         )
@@ -85,11 +106,12 @@ class DatasetContinuityTests(unittest.TestCase):
         """近地失检时不能进入 SEARCH。"""
         episode = _valid_episode()
         index = 10
-        episode[index]["observation"] = list(episode[index - 1]["observation"])
+        lost_observation = list(episode[index - 1]["observation"][:3]) + [0.0] * 7
+        episode[index]["observation"] = lost_observation
         episode[index - 1]["next_observation"] = list(
             episode[index]["observation"]
         )
-        episode[index]["next_observation"] = list(episode[index]["observation"])
+        episode[index]["next_observation"] = list(lost_observation)
         episode[index + 1]["observation"] = list(
             episode[index]["next_observation"]
         )

@@ -29,6 +29,11 @@ TIME_DELTA = 0.1
 RANDOM_SEED = 42
 MIN_SUCCESS_STEPS = 15
 
+# 视觉运动状态使用控制周期差分；限幅只抑制偶发检测跳变，不能替代 YOLO 标定。
+MAX_VISUAL_SPEED = 10.0
+MAX_VISUAL_ACCELERATION = 100.0
+STATE_DIM = 10
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TRAINING_OUTPUT = os.path.join(
     REPO_ROOT, "expert_data_dynamic", "global_expert.jsonl"
@@ -278,15 +283,68 @@ def current_truth(
     )
 
 
-def policy_observation_after_step(
-    current_observation: Sequence[float],
-    raw_next_observation: Sequence[float],
-    marker_visible: bool,
-) -> np.ndarray:
-    """可见时使用新视觉状态，失检时保持上一有效状态。"""
-    current = _vector3(current_observation, "current_observation")
-    raw_next = _vector3(raw_next_observation, "raw_next_observation")
-    return raw_next.astype(np.float32) if marker_visible else current.astype(np.float32)
+class VisualMotionObservation:
+    """将连续 YOLO 位置转换为十维策略 observation。"""
+
+    def __init__(self, time_delta: float) -> None:
+        if not math.isfinite(time_delta) or time_delta <= 0.0:
+            raise ValueError("视觉状态差分时间间隔必须为正的有限数值")
+        self.time_delta = float(time_delta)
+        self.position = np.zeros(3, dtype=np.float32)
+        self.velocity = np.zeros(3, dtype=np.float32)
+        self.acceleration = np.zeros(3, dtype=np.float32)
+        self.has_previous_velocity = False
+
+    def initialize(
+        self, position: Sequence[float], confidence: float
+    ) -> np.ndarray:
+        """每局第一帧只记录位置和置信度，导数统一置零。"""
+        self.position = _vector3(position, "initial_position").astype(np.float32)
+        self.velocity.fill(0.0)
+        self.acceleration.fill(0.0)
+        self.has_previous_velocity = False
+        return self._compose(confidence)
+
+    def update(
+        self,
+        raw_position: Sequence[float],
+        marker_visible: bool,
+        confidence: float,
+    ) -> np.ndarray:
+        """可见时差分；失检时保持位置并清零导数和置信度。"""
+        if not marker_visible:
+            self.velocity.fill(0.0)
+            self.acceleration.fill(0.0)
+            self.has_previous_velocity = False
+            return self._compose(0.0)
+
+        next_position = _vector3(raw_position, "raw_position").astype(np.float32)
+        next_velocity = np.clip(
+            (next_position - self.position) / self.time_delta,
+            -MAX_VISUAL_SPEED,
+            MAX_VISUAL_SPEED,
+        ).astype(np.float32)
+        if self.has_previous_velocity:
+            next_acceleration = np.clip(
+                (next_velocity - self.velocity) / self.time_delta,
+                -MAX_VISUAL_ACCELERATION,
+                MAX_VISUAL_ACCELERATION,
+            ).astype(np.float32)
+        else:
+            # 第一条速度及失检重获后的首条速度没有前一有效速度可比较。
+            next_acceleration = np.zeros(3, dtype=np.float32)
+
+        self.position = next_position
+        self.velocity = next_velocity
+        self.acceleration = next_acceleration
+        self.has_previous_velocity = True
+        return self._compose(confidence)
+
+    def _compose(self, confidence: float) -> np.ndarray:
+        confidence = _confidence(confidence)
+        return np.concatenate(
+            (self.position, self.velocity, self.acceleration, [confidence])
+        ).astype(np.float32)
 
 
 def compute_reward(
@@ -295,8 +353,8 @@ def compute_reward(
     """生成连续距离奖励，并保留真实终止奖励。"""
     if done:
         return 300.0 if success else -200.0
-    observation = _vector3(next_observation, "next_observation")
-    distance = float(np.sum(np.abs(observation) ** 3) ** (1.0 / 3.0))
+    observation = _state_vector(next_observation, "next_observation")
+    distance = float(np.sum(np.abs(observation[:3]) ** 3) ** (1.0 / 3.0))
     return -0.1 * distance
 
 
@@ -308,8 +366,8 @@ def episode_is_trainable(episode: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
         return False, "回合没有成功落地"
     for index, step in enumerate(episode):
         try:
-            observation = _vector3(step["observation"], "observation")
-            next_observation = _vector3(
+            observation = _state_vector(step["observation"], "observation")
+            next_observation = _state_vector(
                 step["next_observation"], "next_observation"
             )
             action = _vector3(step["action"], "action")
@@ -324,7 +382,7 @@ def episode_is_trainable(episode: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
         if bool(step["done"]) != expected_done:
             return False, f"第 {index} 步 done 位置错误"
         if index + 1 < len(episode):
-            following = _vector3(
+            following = _state_vector(
                 episode[index + 1]["observation"], "following_observation"
             )
             if not np.array_equal(next_observation, following):
@@ -396,6 +454,26 @@ def _vector3(value: Sequence[float], name: str) -> np.ndarray:
     return vector
 
 
+def _state_vector(value: Sequence[float], name: str) -> np.ndarray:
+    vector = np.asarray(value, dtype=np.float64).reshape(-1)
+    if vector.shape != (STATE_DIM,):
+        raise ValueError(f"{name} 必须是 {STATE_DIM} 维，当前形状为 {vector.shape}")
+    if not np.all(np.isfinite(vector)):
+        raise ValueError(f"{name} 包含非有限值: {vector}")
+    return vector
+
+
+def _confidence(value: Any) -> float:
+    """将环境提供的可选置信度收敛到策略输入范围。"""
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(confidence):
+        return 0.0
+    return float(np.clip(confidence, 0.0, 1.0))
+
+
 def _finite_float_or_none(value: Any) -> Optional[float]:
     """metadata 中无效的可选数值写为 null，避免生成 NaN JSON。"""
     try:
@@ -438,7 +516,7 @@ def main() -> None:
     print(f"最大尝试次数: {max_attempts}")
     print(f"训练数据: {training_output}")
     print(f"原始数据: {raw_output}")
-    print("训练 observation: 三维 YOLO 状态；失检时保持上一有效值")
+    print("训练 observation: YOLO 位置、速度、加速度和置信度（10维）")
     print("失检策略: 非近地保持水平 action 并用正 z 上升")
     print("=" * 72)
 
@@ -493,15 +571,20 @@ def main() -> None:
 
             try:
                 env.reset()
-                observation = wait_for_initial_observation(
+                initial_position = wait_for_initial_observation(
                     env, INITIAL_DETECTION_WAIT_SECONDS
                 )
             except Exception as error:
                 print(f"第 {attempt_id:04d} 局重置失败: {error}")
                 continue
-            if observation is None:
+            if initial_position is None:
                 print(f"第 {attempt_id:04d} 局初始未看到 marker，重新开始")
                 continue
+
+            observation_builder = VisualMotionObservation(TIME_DELTA)
+            observation = observation_builder.initialize(
+                initial_position, getattr(env, "yolo_confidence", 0.0)
+            )
 
             episode = []
             success = False
@@ -528,8 +611,10 @@ def main() -> None:
                     next_visible = bool(
                         info.get("detection_fresh", info.get("tag_detected", False))
                     )
-                    next_observation = policy_observation_after_step(
-                        observation, raw_next, next_visible
+                    next_observation = observation_builder.update(
+                        raw_next,
+                        next_visible,
+                        info.get("yolo_confidence", 0.0),
                     )
                     truth_after = current_truth(env, controller)
 
@@ -562,6 +647,10 @@ def main() -> None:
                         "env_info": {
                             "marker_visible": bool(marker_visible),
                             "next_marker_visible": bool(next_visible),
+                            "observation_confidence": float(observation[-1]),
+                            "next_observation_confidence": float(
+                                next_observation[-1]
+                            ),
                             "lost_steps": int(lost_steps),
                             "relative_height": relative_height,
                             "relative_xy_distance": _finite_float_or_none(

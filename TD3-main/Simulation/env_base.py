@@ -30,6 +30,7 @@ import signal
 from mavros_msgs.msg import PositionTarget, ParamValue, State
 from mavros_msgs.srv import CommandBool, SetMode, ParamSet
 from geometry_msgs.msg import PoseStamped, Pose, PointStamped, TwistStamped
+from yolov11_ros_msgs.msg import BoundingBoxes
 from gazebo_msgs.msg import ContactsState
 from std_srvs.srv import Empty
 from pyquaternion import Quaternion
@@ -124,11 +125,17 @@ class GazeboEnv:
         self.enable_yolo = bool(enable_yolo)
         self.system_warmup_seconds = float(system_warmup_seconds)
         self.yolo_centers_sub = None
+        self.yolo_boxes_sub = None
         if self.enable_yolo:
             yolo_centers_topic = "/yolov11/centers"
             rospy.loginfo(f"订阅YOLO中心点话题: {yolo_centers_topic}")
             self.yolo_centers_sub = rospy.Subscriber(
                 yolo_centers_topic, PointStamped, self.yolo_centers_callback
+            )
+            yolo_boxes_topic = "/yolov11/BoundingBoxes"
+            rospy.loginfo(f"订阅YOLO检测框话题: {yolo_boxes_topic}")
+            self.yolo_boxes_sub = rospy.Subscriber(
+                yolo_boxes_topic, BoundingBoxes, self.yolo_boxes_callback
             )
         else:
             rospy.loginfo("专家采样模式: 跳过 YOLO 订阅与进程启动")
@@ -171,6 +178,7 @@ class GazeboEnv:
         self.yolo_center_x = 0.5
         self.yolo_center_y = 0.5
         self.yolo_distance_z = 10.0
+        self.yolo_confidence = 0.0
         self.last_yolo_detection_time = rospy.Time.now()
         self.drone_linear_velocity = None
         self.deck_contact = False
@@ -267,6 +275,28 @@ class GazeboEnv:
         except Exception as e:
             rospy.logwarn(f"YOLO回调函数错误: {e}")
             self.yolo_detected = False
+
+    def yolo_boxes_callback(self, msg):
+        """保存与中心点话题同一检测顺序的 YOLO 置信度。"""
+        boxes = getattr(msg, "bounding_boxes", ())
+        if not boxes:
+            # 空检测帧应立即反映为无置信度，不能沿用上一帧数值。
+            self.yolo_confidence = 0.0
+            return
+
+        try:
+            # YOLO 节点按同一顺序发布中心点；环境最终接收的是最后一个中心点。
+            confidence = float(boxes[-1].probability)
+        except (AttributeError, TypeError, ValueError):
+            rospy.logwarn("YOLO检测框缺少有效置信度")
+            self.yolo_confidence = 0.0
+            return
+
+        if not math.isfinite(confidence):
+            rospy.logwarn("YOLO检测框置信度不是有限数值")
+            self.yolo_confidence = 0.0
+            return
+        self.yolo_confidence = float(np.clip(confidence, 0.0, 1.0))
 
     def velocity_callback(self, msg):
         self.drone_linear_velocity = msg.twist.linear
@@ -494,6 +524,9 @@ class GazeboEnv:
             self._publish_action_velocity(np.zeros(3, dtype=np.float32))
 
         success = target and done
+        yolo_confidence = (
+            float(self.yolo_confidence) if detection_fresh else 0.0
+        )
         info = {
             "tag_detected": detection_fresh,
             "detection_fresh": detection_fresh,
@@ -517,6 +550,7 @@ class GazeboEnv:
             "rel_vz": rel_vz,
             "rel_xy_speed": rel_xy_speed,
             "detection_age": detection_age,
+            "yolo_confidence": yolo_confidence,
             "xy_threshold": self.landing_xy_threshold,
         }
         return next_state, done, success, info
@@ -538,6 +572,7 @@ class GazeboEnv:
 
         # === 修改点 4: Reset 时重置内部标志位，而不是重启进程 ===
         self.yolo_detected = False
+        self.yolo_confidence = 0.0
         self._episode_has_detection = False
         self.drone_linear_velocity = None
         self.deck_contact = False

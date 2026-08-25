@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from Simulation.env_base import GazeboEnv, TIME_DELTA
 from Simulation.ship_motion import ShipMotionController
+from Sampling.collect_global_expert import VisualMotionObservation
 from TD3_offline import TD3
 from landing_evaluation import (
     LandingEvaluation, EpisodeData, compute_dynamic_target,
@@ -135,7 +136,7 @@ def main():
                         help='模型权重目录')
     parser.add_argument('--load_step', type=int, default=100000,
                         help='加载步数')
-    parser.add_argument('--state_dim', type=int, default=3)
+    parser.add_argument('--state_dim', type=int, default=10)
     parser.add_argument('--action_dim', type=int, default=3)
     parser.add_argument('--max_action', type=float, default=1.0)
     parser.add_argument('--capacity', type=int, default=65536)
@@ -311,7 +312,11 @@ def main():
                 crash_count += 1
                 continue
 
-            obs = np.asarray(obs, dtype=np.float32).reshape(-1)
+            observation_builder = VisualMotionObservation(args.dt)
+            obs = observation_builder.initialize(
+                np.asarray(obs, dtype=np.float32).reshape(-1),
+                getattr(env, "yolo_confidence", 0.0),
+            )
             norm_obs = normalize(obs)
 
             # ---- LSTM 冷启动 ----
@@ -353,7 +358,16 @@ def main():
                     action = np.asarray(action, dtype=np.float32).reshape(-1)
 
                     # 无人机步进
-                    next_obs, done, success, info = env.step(action)
+                    raw_next_obs, done, success, info = env.step(action)
+                    info = dict(info or {})
+                    next_visible = bool(
+                        info.get("detection_fresh", info.get("tag_detected", False))
+                    )
+                    next_obs = observation_builder.update(
+                        raw_next_obs,
+                        next_visible,
+                        info.get("yolo_confidence", 0.0),
+                    )
                     if info.get("out_of_bounds"):
                         out_of_bounds = True
                     visual_out_of_bounds = bool(info.get("visual_out_of_bounds", False))

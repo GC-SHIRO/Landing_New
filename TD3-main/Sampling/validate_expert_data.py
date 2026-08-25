@@ -13,7 +13,7 @@ import numpy as np
 # ==================== 验证参数：直接修改这里 ====================
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DATA_PATH = os.path.join(REPO_ROOT, "expert_data_dynamic", "global_expert.jsonl")
-STATE_DIM = 3
+STATE_DIM = 10
 ACTION_DIM = 3
 MAX_ACTION = 1.0
 SEQ_LEN = 8
@@ -105,6 +105,10 @@ def validate_dataset(
                 errors.append(f"{step_prefix}: reward 非有限")
             if np.any(np.abs(action) > MAX_ACTION + 1e-6):
                 errors.append(f"{step_prefix}: action 超出 [-{MAX_ACTION}, {MAX_ACTION}]")
+            if not 0.0 <= observation[9] <= 1.0:
+                errors.append(f"{step_prefix}: observation 置信度超出 [0, 1]")
+            if not 0.0 <= next_observation[9] <= 1.0:
+                errors.append(f"{step_prefix}: next_observation 置信度超出 [0, 1]")
 
             expected_done = step_index == len(episode) - 1
             if bool(step["done"]) != expected_done:
@@ -153,18 +157,23 @@ def validate_dataset(
                             STATE_DIM,
                             "上一 observation",
                         )
-                        if not np.array_equal(observation, previous_observation):
+                        if not np.array_equal(observation[:3], previous_observation[:3]):
                             errors.append(
-                                f"{step_prefix}: 失检时没有保持上一有效 observation"
+                                f"{step_prefix}: 失检时没有保持上一有效位置"
                             )
                     except (KeyError, TypeError, ValueError) as error:
                         errors.append(f"{step_prefix}: {error}")
-            if not next_marker_visible and not np.array_equal(
-                next_observation, observation
-            ):
-                errors.append(
-                    f"{step_prefix}: 下一帧失检但 next_observation 没有保持"
-                )
+                if not np.array_equal(observation[3:9], np.zeros(6)):
+                    errors.append(f"{step_prefix}: 失检时速度或加速度没有清零")
+                if observation[9] != 0.0:
+                    errors.append(f"{step_prefix}: 失检时置信度不是零")
+            if not next_marker_visible:
+                if not np.array_equal(next_observation[:3], observation[:3]):
+                    errors.append(f"{step_prefix}: 下一帧失检但位置没有保持")
+                if not np.array_equal(next_observation[3:9], np.zeros(6)):
+                    errors.append(f"{step_prefix}: 下一帧失检但速度或加速度没有清零")
+                if next_observation[9] != 0.0:
+                    errors.append(f"{step_prefix}: 下一帧失检但置信度不是零")
             if phase == "SEARCH":
                 search_steps += 1
                 search_positive_z += int(action[2] > 0.0)
@@ -196,6 +205,18 @@ def validate_dataset(
                 and phase != "SEARCH"
             ):
                 errors.append(f"{step_prefix}: 非近地失检但没有进入 SEARCH")
+
+        first_observation = _finite_vector(
+            episode[0]["observation"], STATE_DIM, f"{prefix} 第一帧 observation"
+        )
+        if not np.array_equal(first_observation[3:9], np.zeros(6)):
+            errors.append(f"{prefix}: 第一帧速度或加速度没有清零")
+        if len(episode) > 1:
+            second_observation = _finite_vector(
+                episode[1]["observation"], STATE_DIM, f"{prefix} 第二帧 observation"
+            )
+            if not np.array_equal(second_observation[6:9], np.zeros(3)):
+                errors.append(f"{prefix}: 第二帧加速度没有清零")
 
     if total_windows < BATCH_SIZE:
         errors.append(

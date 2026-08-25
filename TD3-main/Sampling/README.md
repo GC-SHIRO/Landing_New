@@ -6,10 +6,13 @@
 python TD3-main/Sampling/collect_global_expert.py
 ```
 
-专家使用无人机和动态甲板的全局真值生成动作，训练 observation 仍使用实际三维 YOLO 状态：
+专家使用无人机和动态甲板的全局真值生成动作，训练 observation 只使用实际 YOLO 状态及其差分：
 
 ```text
-[marker_x, marker_y, marker_z]
+[position_x, position_y, position_z,
+ velocity_x, velocity_y, velocity_z,
+ acceleration_x, acceleration_y, acceleration_z,
+ yolo_confidence]
 ```
 
 输出文件每行保存一个完整成功 episode，可直接交给 `TD3_offline.py`。
@@ -24,6 +27,16 @@ python TD3-main/Sampling/collect_global_expert.py
 - `tests/test_dataset_continuity.py`：相邻帧和 TD3 数据格式测试。
 
 旧采集器和旧质量门测试已经删除；需要追溯时直接使用 Git 历史。
+
+### 旧三维数据转换
+
+可用交互脚本将旧格式“每行一个 episode”的三维 JSONL 原路径转换为十维：
+
+```bash
+python scripts/convert_legacy_3d_dataset.py
+```
+
+输入文件路径并键入 `YES` 后，脚本会先创建同目录的 `.pre_10d_backup` 备份，再原子替换原文件。旧数据没有真实 YOLO 置信度，转换得到的置信度只能是 `marker_visible` 的 `1/0` 代理值，适合迁移和链路冒烟验证，不应用于正式十维模型训练。
 
 ## 修改参数
 
@@ -64,7 +77,8 @@ done
 
 固定约束：
 
-- `observation`、`next_observation` 和 `action` 都是三维数组。
+- `observation` 和 `next_observation` 都是十维数组；前三维是 YOLO 相对位置，随后三维是相对速度、三维是相对加速度，最后一维是 YOLO 置信度。
+- `action` 是三维数组。
 - action 每一维都在 `[-1, 1]`。
 - 每行是一个完整 episode。
 - 只把成功且长度不少于 15 的完整 episode 写入训练文件。
@@ -82,12 +96,13 @@ done
 
 marker 可见时：
 
-- observation 使用当前新鲜 YOLO 状态。
+- observation 使用当前新鲜 YOLO 位置、按 `TIME_DELTA=0.1s` 差分出的速度和加速度，以及 `/yolov11/BoundingBoxes` 的检测置信度。
+- 每局第一帧速度、加速度均为零；第二帧只计算速度；第三帧起才计算加速度。
 - 专家使用全局真值执行对准、跟踪、下降和触地。
 
 非近地失检时：
 
-- observation 保持最近一次有效 YOLO 状态。
+- observation 的位置保持最近一次有效 YOLO 位置；速度、加速度和置信度全部置零。
 - 不删帧、不插值、不写入真值冒充视觉状态。
 - 专家进入 `SEARCH`。
 - action 的水平分量保持上一条实际 action 不变。
@@ -97,7 +112,7 @@ marker 可见时：
 
 近地失检时不进入 `SEARCH`。专家继续使用全局真值低速触地，避免因为相机近距离遮挡而重新爬升。
 
-由于 `TD3_offline.py` 固定 `state_dim=3`，数据中没有额外增加可见性维度。LSTM 通过连续保持的视觉状态和对应的正 z 专家动作学习搜寻行为。因此后续推理端也必须在失检时保持上一有效 observation。
+`TD3_offline.py` 默认使用 `state_dim=10`。后续推理端必须使用与采集器相同的差分初始化、限幅和失检清零规则。
 
 ## 动态场景
 
@@ -158,10 +173,10 @@ python TD3-main/Sampling/validate_expert_data.py
 
 验证器检查：
 
-- 五个核心字段、三维形状和有限数值。
+- 五个核心字段、十维形状、有限数值和置信度范围。
 - action 范围。
 - step_index、done 和相邻 observation 链。
-- 失检帧是否保持上一有效 observation。
+- 失检帧是否保持上一有效位置，并将速度、加速度和置信度清零。
 - 非近地失检是否进入 SEARCH。
 - SEARCH 是否保持水平 action 且 z 为正。
 - 近地失检是否错误进入 SEARCH。
@@ -185,7 +200,7 @@ python TD3-main/TD3_offline.py \
   --data_path expert_data_dynamic/global_expert.jsonl \
   --ckpt_dir checkpoints/TD3/global_expert \
   --training_steps 100000 \
-  --state_dim 3 \
+  --state_dim 10 \
   --action_dim 3 \
   --max_action 1.0 \
   --seq_len 8 \

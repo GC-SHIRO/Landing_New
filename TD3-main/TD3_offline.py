@@ -44,7 +44,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 @dataclass
 class Args:
     # environment dims
-    state_dim: int = 3
+    state_dim: int = 10
     action_dim: int = 3
     max_action: float = 1.0
 
