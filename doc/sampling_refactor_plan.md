@@ -1,12 +1,18 @@
 # Sampling 重构规划：全局真值专家自动采集
 
+## 当前目录说明
+
+仓库目录整理后，模型数据接口位于 `model/td3_offline.py`，离线训练入口为
+`scripts/train_offline.py`，Sampling 输出统一位于 `data/expert_global/`。
+本文其余部分保留 Sampling 初次重构时的设计背景和阶段性参数记录。
+
 ## 1. 目标
 
-重构 `TD3-main/Sampling`，提供一套简单、稳定、可重复的自动专家数据采集流程。
+重构 `Sampling`，提供一套简单、稳定、可重复的自动专家数据采集流程。
 
 最终只解决一件事：
 
-> 使用能够读取仿真全局真值的专家稳定降落，并生成可被现有 `TD3_offline.py` 直接读取和正常训练的连续 JSONL 专家数据。
+> 使用能够读取仿真全局真值的专家稳定降落，并生成可被现有 `model/td3_offline.py` 直接读取和正常训练的连续 JSONL 专家数据。
 
 本次规划遵循以下约束：
 
@@ -15,8 +21,8 @@
 - 训练 observation 与实际运行时的三维视觉输入保持一致；目标丢失帧也连续记录。
 - 不删除单个 transition，不拼接跨时间缺口。
 - 保持 `state_dim=3`、`action_dim=3` 和当前 JSON/JSONL 字段兼容。
-- `TD3-main/TD3_offline.py` 是唯一的数据接口规范；Sampling 主动适配它。
-- 不修改 `TD3_offline.py`，也不要求它适配新的采集器。
+- `model/td3_offline.py` 是唯一的数据接口规范；Sampling 主动适配它。
+- 不修改 `model/td3_offline.py`，也不要求它适配新的采集器。
 - 旧 Sampling 代码在新流程实现并通过离线测试后删除，需要时通过 Git 历史追溯。
 
 ## 2. 不做的事情
@@ -32,9 +38,9 @@
 - 为旧版所有参数和入口提供永久兼容层。
 - 复杂 CLI、配置文件系统、自动恢复和过度的文件保护逻辑。
 
-## 2.1 `TD3_offline.py` 固定契约
+## 2.1 `model/td3_offline.py` 固定契约
 
-规划和实现均以当前 `TD3-main/TD3_offline.py` 的实际代码为准，而不是根据旧采集脚本推测格式。
+规划和实现均以当前 `model/td3_offline.py` 的实际代码为准，而不是根据旧采集脚本推测格式。
 
 当前默认训练配置为：
 
@@ -82,7 +88,7 @@ Sampling 以方便直接打开代码修改为优先，不建立复杂的命令�
 最大尝试回合数 = 1500
 单回合最大步数 = 600
 随机种子 = 42
-输出文件 = "expert_data_dynamic/global_expert.jsonl"
+输出文件 = "data/expert_global/global_expert.jsonl"
 
 # ==================== 丢失目标处理 ====================
 近地高度阈值 = 0.60
@@ -98,7 +104,7 @@ Sampling 以方便直接打开代码修改为优先，不建立复杂的命令�
 正式采集运行时不要求传入参数：
 
 ```bash
-python TD3-main/Sampling/collect_global_expert.py
+python -m Sampling.collect_global_expert
 ```
 
 如以后确实需要临时覆盖，只保留极少数必要参数；第一版不实现通用 CLI 配置层。
@@ -106,7 +112,7 @@ python TD3-main/Sampling/collect_global_expert.py
 唯一例外是少量样本冒烟测试开关：
 
 ```bash
-python TD3-main/Sampling/collect_global_expert.py --test
+python -m Sampling.collect_global_expert --test
 ```
 
 测试模式只保存 2 个成功 episode、最多尝试 5 局，并使用独立且启动时清空的 test JSONL，不影响正式数据。
@@ -137,7 +143,7 @@ observation = [visual_relative_x, visual_relative_y, visual_height]
 
 - marker 可见时，直接记录当前环境提供的新鲜三维视觉 observation。
 - marker 丢失时，不删除该物理 step，也不改用全局真值冒充策略输入。
-- 由于 `TD3_offline.py` 固定 `state_dim=3`，不能额外增加 `visible` 第四维；丢失时沿用最近一次有效 observation，形成连续的“保持值”序列。
+- 由于 `model/td3_offline.py` 固定 `state_dim=3`，不能额外增加 `visible` 第四维；丢失时沿用最近一次有效 observation，形成连续的“保持值”序列。
 - 第 `i` 步保存的 `next_observation` 原样作为第 `i+1` 步的 `observation`，保证严格连续。
 - 全局真值、`marker_visible` 和丢失持续步数只写入 metadata，用于专家控制和数据检查，不进入模型输入。
 
@@ -157,7 +163,7 @@ action = [vx_body, vy_body, vz]
 
 约束：
 
-- 与 `Simulation.env_base` 的 `set_velocity_target` 完全相同。
+- 与 `Simulation.env.env_base` 的 `set_velocity_target` 完全相同。
 - 每个维度限制在 `[-1, 1]`。
 - z 轴沿用当前实测语义：负值下降，正值上升。
 - 数据中的 `action` 必须是本步真正发送给环境的命令，而不是发送后的测量速度。
@@ -170,7 +176,7 @@ measured_drone_velocity
 target_velocity
 ```
 
-这些诊断字段不进入 `TD3_offline.py`。
+这些诊断字段不进入 `model/td3_offline.py`。
 
 ### 3.5 每个成功 episode 原样完整保存
 
@@ -190,7 +196,7 @@ target_velocity
 保持结构精简，只建立三个主要实现文件：
 
 ```text
-TD3-main/Sampling/
+Sampling/
 ├── global_expert.py
 ├── collect_global_expert.py
 ├── validate_expert_data.py
@@ -451,7 +457,7 @@ for episode_id in range(max_attempts):
 ]
 ```
 
-`TD3_offline.py` 只使用上述五个核心字段，因此额外 metadata 不影响现有训练。
+`model/td3_offline.py` 只使用上述五个核心字段，因此额外 metadata 不影响现有训练。
 
 训练文件要求：
 
@@ -480,11 +486,11 @@ terminal_failure_reward = -200
 
 奖励只根据写入数据的状态和最终环境结果计算，不使用固定世界坐标成功框。
 
-需要特别注意：当前 `TD3_offline.py` 的窗口构造不会把 episode 最后一条 transition 放进回放池，因此 terminal 的 `done` 和 `±300/200` 不会成为实际训练样本。不能把“学会下降和对准”寄托在最后的成功奖励上。终止前每一步的连续距离奖励、专家动作以及完整状态轨迹才是当前训练器真正使用的监督信号。
+需要特别注意：当前 `model/td3_offline.py` 的窗口构造不会把 episode 最后一条 transition 放进回放池，因此 terminal 的 `done` 和 `±300/200` 不会成为实际训练样本。不能把“学会下降和对准”寄托在最后的成功奖励上。终止前每一步的连续距离奖励、专家动作以及完整状态轨迹才是当前训练器真正使用的监督信号。
 
 terminal reward 仍按环境真实结果记录，保证文件语义正确；Sampling 不复制终止奖励到前一步，也不增加虚假 transition。小规模训练验收若证明 critic 的奖励信号不足，再单独评估训练侧问题，不在采集数据中做隐式补偿。
 
-本轮不调整 `TD3_offline.py` 对终止 transition 的使用方式；这是训练侧独立事项，不在 Sampling 重构中绕过或伪造数据。
+本轮不调整 `model/td3_offline.py` 对终止 transition 的使用方式；这是训练侧独立事项，不在 Sampling 重构中绕过或伪造数据。
 
 ## 10. 写盘策略
 
@@ -508,8 +514,8 @@ terminal reward 仍按环境真实结果记录，保证文件语义正确；Samp
 建议默认输出：
 
 ```text
-expert_data_dynamic/global_expert.jsonl
-expert_data_dynamic/global_expert_raw.jsonl
+data/expert_global/global_expert.jsonl
+data/expert_global/global_expert_raw.jsonl
 ```
 
 开始新一批数据前由使用者直接修改顶部文件名，避免不小心把不同配置的数据混在一起。脚本启动时打印最终输出路径即可。
@@ -653,20 +659,20 @@ Sampling 重构完成需要同时满足：
 Sampling 的参数直接修改脚本顶部，然后无参数运行：
 
 ```bash
-python TD3-main/Sampling/collect_global_expert.py
+python -m Sampling.collect_global_expert
 ```
 
 验证器的数据路径同样写在脚本顶部：
 
 ```bash
-python TD3-main/Sampling/validate_expert_data.py
+python -m Sampling.validate_expert_data
 ```
 
 验证通过后，唯一训练入口为：
 
 ```bash
-python TD3-main/TD3_offline.py \
-  --data_path expert_data_dynamic/global_expert.jsonl \
+python -m scripts.train_offline \
+  --data_path data/expert_global/global_expert.jsonl \
   --ckpt_dir checkpoints/TD3/global_expert \
   --training_steps 100000 \
   --state_dim 3 \

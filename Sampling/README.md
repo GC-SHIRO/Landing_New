@@ -3,7 +3,7 @@
 当前推荐入口是：
 
 ```bash
-python TD3-main/Sampling/collect_global_expert.py
+python -m Sampling.collect_global_expert
 ```
 
 专家使用无人机和动态甲板的全局真值生成动作，训练 observation 只使用实际 YOLO 状态及其差分：
@@ -15,7 +15,7 @@ python TD3-main/Sampling/collect_global_expert.py
  yolo_confidence]
 ```
 
-输出文件每行保存一个完整成功 episode，可直接交给 `TD3_offline.py`。
+输出文件每行保存一个完整成功 episode，可直接交给 `scripts/train_offline.py`。
 
 ## 文件说明
 
@@ -33,7 +33,7 @@ python TD3-main/Sampling/collect_global_expert.py
 可用交互脚本将旧格式“每行一个 episode”的三维 JSONL 原路径转换为十维：
 
 ```bash
-python scripts/convert_legacy_3d_dataset.py
+python -m scripts.convert_legacy_3d_dataset
 ```
 
 输入文件路径并键入 `YES` 后，脚本会先创建同目录的 `.pre_10d_backup` 备份，再原子替换原文件。旧数据没有真实 YOLO 置信度，转换得到的置信度只能是 `marker_visible` 的 `1/0` 代理值，适合迁移和链路冒烟验证，不应用于正式十维模型训练。
@@ -65,7 +65,7 @@ CLEAR_OUTPUT_ON_START = False
 
 ## 数据规则
 
-核心字段严格匹配 `TD3_offline.py`：
+核心字段严格匹配 `model/td3_offline.py` 的数据接口：
 
 ```text
 observation
@@ -84,7 +84,7 @@ done
 - 只把成功且长度不少于 15 的完整 episode 写入训练文件。
 - episode 最后一条 `done=True`，其他步骤均为 `False`。
 - `step[i].next_observation` 与 `step[i+1].observation` 完全相同。
-- 不在 Sampling 中归一化；`TD3_offline.py` 自己计算并保存 mean/std。
+- 不在 Sampling 中归一化；`scripts/train_offline.py` 计算并保存 mean/std。
 - 不删除任何中间 transition。
 
 所有尝试回合写入 raw 文件；只有成功完整回合写入 training 文件。
@@ -112,7 +112,7 @@ marker 可见时：
 
 近地失检时不进入 `SEARCH`。专家继续使用全局真值低速触地，避免因为相机近距离遮挡而重新爬升。
 
-`TD3_offline.py` 默认使用 `state_dim=10`。后续推理端必须使用与采集器相同的差分初始化、限幅和失检清零规则。
+模型默认使用 `state_dim=10`。后续推理端必须使用与采集器相同的差分初始化、限幅和失检清零规则。
 
 ## 动态场景
 
@@ -141,7 +141,7 @@ CLEAR_OUTPUT_ON_START = True
 运行：
 
 ```bash
-python TD3-main/Sampling/collect_global_expert.py
+python -m Sampling.collect_global_expert
 ```
 
 采集过程中每局打印：运动类别、是否保存、成功状态、总步数、SEARCH 步数和当前进度。
@@ -151,7 +151,7 @@ python TD3-main/Sampling/collect_global_expert.py
 正式采集前可以使用唯一的测试开关：
 
 ```bash
-python TD3-main/Sampling/collect_global_expert.py --test
+python -m Sampling.collect_global_expert --test
 ```
 
 测试模式固定为：
@@ -168,7 +168,7 @@ python TD3-main/Sampling/collect_global_expert.py --test
 先在 `validate_expert_data.py` 顶部确认 `DATA_PATH`，然后运行：
 
 ```bash
-python TD3-main/Sampling/validate_expert_data.py
+python -m Sampling.validate_expert_data
 ```
 
 验证器检查：
@@ -185,7 +185,7 @@ python TD3-main/Sampling/validate_expert_data.py
 离线测试：
 
 ```bash
-PYTHONPATH=TD3-main python3 -m unittest \
+python3 -m unittest \
   Sampling.tests.test_global_expert \
   Sampling.tests.test_policy_observation \
   Sampling.tests.test_dataset_continuity -v
@@ -196,8 +196,8 @@ PYTHONPATH=TD3-main python3 -m unittest \
 验证通过后只使用现有训练脚本：
 
 ```bash
-python TD3-main/TD3_offline.py \
-  --data_path expert_data_dynamic/global_expert.jsonl \
+python -m scripts.train_offline \
+  --data_path data/expert_global/global_expert.jsonl \
   --ckpt_dir checkpoints/TD3/global_expert \
   --training_steps 100000 \
   --state_dim 10 \

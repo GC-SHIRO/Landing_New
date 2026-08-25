@@ -1,6 +1,6 @@
 # 项目开发约定
 
-本文件适用于整个 `/home/shiro/Landing_new` 仓库。
+本文件适用于整个仓库。
 
 ## 总体原则
 
@@ -27,10 +27,10 @@
 
 ## Sampling 数据约定
 
-- `TD3-main/TD3_offline.py` 是离线训练数据接口的唯一标准；除非用户明确要求，否则不要修改它。
+- `model/td3_offline.py` 是离线训练数据接口的唯一标准；除非用户明确要求，否则不要修改它。
 - Sampling 输出必须包含：`observation`、`action`、`reward`、`next_observation`、`done`。
 - 默认保持 `state_dim=3`、`action_dim=3`、`max_action=1.0` 和 `seq_len=8` 的兼容性。
-- Sampling 写原始 observation，不提前归一化；归一化由 `TD3_offline.py` 完成。
+- Sampling 写原始 observation，不提前归一化；归一化由 `scripts/train_offline.py` 完成。
 - 每行保存一个完整 episode，不删除中间 transition，不拼接不相邻帧。
 - 必须满足 `step[i].next_observation == step[i+1].observation`。
 - 只把完整成功 episode 写入正式训练文件；失败尝试可以写入独立 raw 文件。
@@ -49,5 +49,5 @@
 
 ## 文档同步
 
-- Sampling 的入口、参数、输出文件或数据语义变化时，同步更新 `TD3-main/Sampling/README.md`。
+- Sampling 的入口、参数、输出文件或数据语义变化时，同步更新 `Sampling/README.md`。
 - 重要架构决定同步更新 `doc/sampling_refactor_plan.md`。

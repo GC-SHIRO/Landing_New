@@ -10,7 +10,6 @@
 """
 
 import os
-import sys
 import time
 import signal
 import argparse
@@ -18,14 +17,11 @@ from collections import deque
 
 import numpy as np
 
-# 路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
-from Simulation.env_base import GazeboEnv, TIME_DELTA
+from Simulation.env.env_base import GazeboEnv, TIME_DELTA
 from Simulation.ship_motion import ShipMotionController
 from Sampling.collect_global_expert import VisualMotionObservation
-from TD3_offline import TD3
-from landing_evaluation import (
+from model.td3_offline import TD3
+from Simulation.landing_evaluation import (
     LandingEvaluation, EpisodeData, compute_dynamic_target,
     estimate_velocity_from_positions, estimate_accel_from_positions,
     build_relative_dynamics,
@@ -132,7 +128,10 @@ def main():
 
     # ---- 模型加载 ----
     parser.add_argument('--ckpt_dir', type=str,
-                        default='/home/shiro/Landing_new/checkpoints/TD3/LSTM1',
+                        default=os.path.join(
+                            os.path.dirname(os.path.dirname(__file__)),
+                            'checkpoints', 'TD3', 'LSTM1'
+                        ),
                         help='模型权重目录')
     parser.add_argument('--load_step', type=int, default=60000,
                         help='加载步数')

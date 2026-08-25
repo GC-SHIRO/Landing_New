@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""自动采集可由 TD3_offline.py 直接训练的动态降落专家数据。"""
+"""自动采集可由离线训练入口直接读取的动态降落专家数据。"""
 
 import argparse
 import json
 import math
 import os
-import sys
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from Sampling.global_expert import ExpertConfig, GlobalLandingExpert
 
 if TYPE_CHECKING:
-    from Simulation.env_base import GazeboEnv
+    from Simulation.env.env_base import GazeboEnv
     from Simulation.ship_motion import ShipMotionController
 
 
@@ -34,12 +31,13 @@ MAX_VISUAL_SPEED = 10.0
 MAX_VISUAL_ACCELERATION = 100.0
 STATE_DIM = 10
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+EXPERT_GLOBAL_DIR = os.path.join(REPO_ROOT, "data", "expert_global")
 TRAINING_OUTPUT = os.path.join(
-    REPO_ROOT, "expert_data_dynamic", "global_expert.jsonl"
+    EXPERT_GLOBAL_DIR, "global_expert.jsonl"
 )
 RAW_OUTPUT = os.path.join(
-    REPO_ROOT, "expert_data_dynamic", "global_expert_raw.jsonl"
+    EXPERT_GLOBAL_DIR, "global_expert_raw.jsonl"
 )
 
 # False 表示向现有文件追加；开始新实验时可改为 True。
@@ -50,10 +48,10 @@ TEST_TARGET_SAVED_EPISODES = 2
 TEST_MAX_ATTEMPTS = 5
 TEST_MAX_STEPS = 600
 TEST_TRAINING_OUTPUT = os.path.join(
-    REPO_ROOT, "expert_data_dynamic", "global_expert_test.jsonl"
+    EXPERT_GLOBAL_DIR, "global_expert_test.jsonl"
 )
 TEST_RAW_OUTPUT = os.path.join(
-    REPO_ROOT, "expert_data_dynamic", "global_expert_test_raw.jsonl"
+    EXPERT_GLOBAL_DIR, "global_expert_test_raw.jsonl"
 )
 
 
@@ -494,7 +492,7 @@ def main() -> None:
     raw_output = str(settings["raw_output"])
 
     # ROS/Gazebo 只在真正采集时导入，离线测试无需安装这些依赖。
-    from Simulation.env_base import GazeboEnv, TIME_DELTA as ENV_TIME_DELTA
+    from Simulation.env.env_base import GazeboEnv, TIME_DELTA as ENV_TIME_DELTA
     from Simulation.ship_motion import ShipMotionController
 
     if abs(float(ENV_TIME_DELTA) - TIME_DELTA) > 1e-9:

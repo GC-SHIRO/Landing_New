@@ -47,7 +47,6 @@ Step0: 船舶运动测试场
 """
 
 import os
-import sys
 import time
 import signal
 import argparse
@@ -57,7 +56,6 @@ import math
 import numpy as np
 import rospy
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from Simulation.ship_motion import ShipMotionController
 
 DEFAULT_LAUNCH = "/home/shiro/PX4_Firmware/launch/step1_linear.launch"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""训练前检查 global_expert.jsonl 是否满足 TD3_offline.py 的输入要求。"""
+"""训练前检查 global_expert.jsonl 是否满足模型数据接口要求。"""
 
 import json
 import math
@@ -11,8 +11,10 @@ import numpy as np
 
 
 # ==================== 验证参数：直接修改这里 ====================
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DATA_PATH = os.path.join(REPO_ROOT, "expert_data_dynamic", "global_expert.jsonl")
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA_PATH = os.path.join(
+    REPO_ROOT, "data", "expert_global", "global_expert.jsonl"
+)
 STATE_DIM = 10
 ACTION_DIM = 3
 MAX_ACTION = 1.0
@@ -300,7 +302,7 @@ def main() -> None:
         if len(errors) > 50:
             print(f"- 其余 {len(errors) - 50} 个问题未展开")
         raise SystemExit(1)
-    print("验证通过，可以交给 TD3_offline.py 训练")
+    print("验证通过，可以交给 scripts.train_offline 训练")
 
 
 if __name__ == "__main__":

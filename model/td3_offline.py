@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TD3_offline.py
+TD3 离线训练模型封装
 
 用途:
 - 使用离线专家数据训练 TD3-BC(LSTM+Attention) 策略, 产出可直接评估/在线微调的权重。
 
 用法:
-- 训练: python TD3_offline.py --data_path <expert.json/jsonl> --ckpt_dir <dir>
-- 监控: tensorboard --logdir <ckpt_dir>/runs
+- 训练入口: python -m scripts.train_offline
+- 作为模型模块: from model.td3_offline import OfflineTD3BCLSTM
 
 实现方式:
 - 网络: LSTM Actor/Critic + 特征注意力。
@@ -17,15 +17,15 @@ TD3_offline.py
 - 归一化: 计算并保存 state_mean.npy / state_std.npy。
 
 依赖关系:
-- 被 train_test.py、evaluate_iros_new.py 通过 TD3/OfflineTD3BCLSTM 加载模型。
-- 不直接依赖 ROS, 仅依赖 numpy/torch/tensorboard。
+- 被训练、在线微调和仿真评估入口通过 TD3/OfflineTD3BCLSTM 加载模型。
+- 不直接依赖 ROS，仅依赖 NumPy 和 PyTorch。
 """
 
 import os
 import json
 import random
-import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Tuple, Optional, List, Any
 
 import numpy as np
@@ -33,9 +33,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ============================================================
@@ -83,8 +83,8 @@ class Args:
     capacity: int = 200_000
 
     # io
-    data_path: str = "/home/shiro/Landing_new/expert_data_lstm.json"
-    ckpt_dir: str = "/home/shiro/Landing_new/checkpoints/TD3/LSTM1"
+    data_path: str = str(PROJECT_ROOT / "data" / "expert_global" / "global_expert.jsonl")
+    ckpt_dir: str = str(PROJECT_ROOT / "checkpoints" / "TD3" / "global_expert")
     save_every: int = 10000
     log_every: int = 61
     seed: int = 1
@@ -687,7 +687,7 @@ class OfflineTD3BCLSTM:
 
 
 # ============================================================
-# Backward compatible wrapper (so old scripts can: from TD3_offline import TD3)
+# 兼容旧脚本调用方式的 TD3 封装
 # ============================================================
 class TD3:
     """
@@ -771,138 +771,3 @@ def fill_buffer_from_episodes(agent: OfflineTD3BCLSTM, episodes: List[List[Dict[
 
         added_total += agent.buffer.add_episode(states, actions, rewards, dones, is_expert=True)
     return added_total
-
-
-# ============================================================
-# Main
-# ============================================================
-def parse_args() -> Args:
-    p = argparse.ArgumentParser()
-
-    # paths fixed in code by defaults (still overridable via CLI)
-    p.add_argument("--data_path", type=str, default=Args.data_path)
-    p.add_argument("--ckpt_dir", type=str, default=Args.ckpt_dir)
-
-    p.add_argument("--training_steps", type=int, default=Args.training_steps)
-    p.add_argument("--batch_size", type=int, default=Args.batch_size)
-    p.add_argument("--capacity", type=int, default=Args.capacity)
-    p.add_argument("--seq_len", type=int, default=Args.seq_len)
-
-    p.add_argument("--state_dim", type=int, default=Args.state_dim)
-    p.add_argument("--action_dim", type=int, default=Args.action_dim)
-    p.add_argument("--max_action", type=float, default=Args.max_action)
-
-    p.add_argument("--gamma", type=float, default=Args.gamma)
-    p.add_argument("--tau", type=float, default=Args.tau)
-    p.add_argument("--policy_delay", type=int, default=Args.policy_delay)
-    p.add_argument("--policy_noise", type=float, default=Args.policy_noise)
-    p.add_argument("--noise_clip", type=float, default=Args.noise_clip)
-
-    p.add_argument("--lr_actor", type=float, default=Args.lr_actor)
-    p.add_argument("--lr_critic", type=float, default=Args.lr_critic)
-    p.add_argument("--weight_decay", type=float, default=Args.weight_decay)
-    p.add_argument("--grad_clip", type=float, default=Args.grad_clip)
-    p.add_argument("--state_noise_std", type=float, default=Args.state_noise_std)
-
-    p.add_argument("--hidden_dim", type=int, default=Args.hidden_dim)
-    p.add_argument("--attn_hidden_dim", type=int, default=Args.attn_hidden_dim)
-    p.add_argument("--dropout_p", type=float, default=Args.dropout_p)
-
-    # keep your original style: store_true + default
-    p.add_argument("--use_expert_only_bc", action="store_true", default=Args.use_expert_only_bc)
-    p.add_argument("--bc_weight_init", type=float, default=Args.bc_weight_init)
-    p.add_argument("--bc_weight_final", type=float, default=Args.bc_weight_final)
-    p.add_argument("--bc_anneal_steps", type=int, default=Args.bc_anneal_steps)
-    p.add_argument("--use_td3bc_adaptive_lambda", action="store_true", default=Args.use_td3bc_adaptive_lambda)
-    p.add_argument("--td3bc_alpha", type=float, default=Args.td3bc_alpha)
-
-    p.add_argument("--save_every", type=int, default=Args.save_every)
-    p.add_argument("--log_every", type=int, default=Args.log_every)
-    p.add_argument("--seed", type=int, default=Args.seed)
-
-    ns = p.parse_args()
-    return Args(**vars(ns))
-
-
-def main():
-    args = parse_args()
-    set_seed(args.seed)
-
-    os.makedirs(args.ckpt_dir, exist_ok=True)
-
-    # TensorBoard
-    log_dir = os.path.join(args.ckpt_dir, "runs")
-    writer = SummaryWriter(log_dir=log_dir)
-    print(f"[TB] log_dir = {log_dir}")
-    print("[TB] Start TensorBoard in another terminal:")
-    print(f'    tensorboard --logdir "{log_dir}" --port 6006 --bind_all')
-    print("    then open: http://localhost:6006")
-
-    try:
-        # 1) Load episodes (JSON or JSONL; supports done-delimited multi-episode)
-        episodes = read_offline_episodes(args.data_path)
-        if not episodes:
-            raise RuntimeError(f"[Data] No episodes loaded from: {args.data_path}")
-
-        # 2) Compute & save normalization stats
-        mean, std = compute_mean_std(episodes, args.state_dim)
-        np.save(os.path.join(args.ckpt_dir, "state_mean.npy"), mean)
-        np.save(os.path.join(args.ckpt_dir, "state_std.npy"), std)
-        print(f"[Stats] mean shape={mean.shape} std shape={std.shape}")
-
-        # 3) Normalize episodes
-        norm_episodes = normalize_episodes(episodes, mean, std)
-        print(f"[Episodes] loaded = {len(norm_episodes)}")
-
-        # 4) Init agent + fill buffer with sequences
-        agent = OfflineTD3BCLSTM(args)
-        added = fill_buffer_from_episodes(agent, norm_episodes)
-        print(f"[Buffer] sequences = {len(agent.buffer)} (added {added})")
-
-        if len(agent.buffer) < max(10, args.batch_size):
-            raise RuntimeError(
-                f"[Buffer] Too small after sequencing: {len(agent.buffer)}. "
-                f"Need at least batch_size={args.batch_size}. "
-                f"Check seq_len={args.seq_len} and dataset length."
-            )
-
-        # 5) Train offline
-        print("===== Start Pure Offline Training =====")
-        for i in range(args.training_steps):
-            info = agent.train_one_step()
-            step = int(info.get("step", agent.train_step))
-
-            if (i + 1) % args.log_every == 0:
-                writer.add_scalar("loss/critic", float(info["critic_loss"]), step)
-                writer.add_scalar("loss/actor", float(info["actor_loss"]), step)
-                writer.add_scalar("loss/bc", float(info["bc_loss"]), step)
-                writer.add_scalar("loss/td3", float(info["td3_loss"]), step)
-                writer.add_scalar("misc/lambda", float(info["lambda"]), step)
-                writer.add_scalar("misc/bc_weight", float(info["bc_weight"]), step)
-                writer.add_scalar("misc/actor_updated", float(info["actor_updated"]), step)
-
-                print(
-                    f"Step {i+1}/{args.training_steps} | "
-                    f"Critic {info['critic_loss']:.4f} | "
-                    f"Actor {info['actor_loss']:.4f} | "
-                    f"BC {info['bc_loss']:.4f} | "
-                    f"TD3 {info['td3_loss']:.4f} | "
-                    f"lam {info['lambda']:.2f} | "
-                    f"bc_w {info['bc_weight']:.3f} | "
-                    f"upd {int(info['actor_updated'])}"
-                )
-                writer.flush()
-
-            if (i + 1) % args.save_every == 0:
-                print(f"[Save] step={agent.train_step} -> {args.ckpt_dir}")
-                agent.save(args.ckpt_dir, step=agent.train_step)
-
-        agent.save(args.ckpt_dir, step=agent.train_step)
-        print(f"[Done] saved final checkpoint at step={agent.train_step} -> {args.ckpt_dir}")
-
-    finally:
-        writer.close()
-
-
-if __name__ == "__main__":
-    main()

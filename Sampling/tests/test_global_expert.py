@@ -2,13 +2,9 @@
 # -*- coding: utf-8 -*-
 """离线测试简化全局专家和 SEARCH 行为。"""
 
-import os
-import sys
 import unittest
 
 import numpy as np
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from Sampling.global_expert import ExpertConfig, GlobalLandingExpert
 
@@ -94,7 +90,7 @@ class GlobalExpertTests(unittest.TestCase):
         self.assertLess(command.action[2], 0.0)
 
     def test_action_always_stays_in_td3_range(self):
-        """专家动作必须满足 TD3_offline.py 的 [-1, 1] 范围。"""
+        """专家动作必须满足模型接口的 [-1, 1] 范围。"""
         command = self.expert.compute_action(
             drone_position=[-10.0, -10.0, 8.0],
             drone_velocity=[-2.0, -2.0, 0.0],

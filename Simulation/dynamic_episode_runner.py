@@ -76,7 +76,7 @@ def bind_dynamic_landing(
 
 def create_live_runtime(*args, **kwargs):
     """Construct ROS-backed runtime objects without imposing ROS on imports."""
-    from Simulation.env_base import GazeboEnv
+    from Simulation.env.env_base import GazeboEnv
     from Simulation.ship_motion import ShipMotionController
 
     env_kwargs = kwargs.pop("env_kwargs", {})

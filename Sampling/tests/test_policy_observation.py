@@ -2,13 +2,9 @@
 # -*- coding: utf-8 -*-
 """离线测试十维策略 observation 的构造规则。"""
 
-import os
-import sys
 import unittest
 
 import numpy as np
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from Sampling.collect_global_expert import (
     VisualMotionObservation,

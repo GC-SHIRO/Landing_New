@@ -3,7 +3,7 @@
 - 在仿真环境中采集专家演示数据(在线飞行轨迹), 以 JSONL 形式写入离线训练数据集。
 
 用法:
-- python train_listen.py --max_episodes N
+- python -m scripts.train_listen --max_episodes N
 - 输出文件默认为 expert_data_lstm_left_up.json(每行一个 episode)。
 
 实现方式:
@@ -11,22 +11,21 @@
 - 回合结束按条件筛选(成功且长度足够)并追加写盘, 同时回填 episode 总奖励。
 
 依赖关系:
-- 依赖 landing_env_listen.py 提供 GazeboEnv 交互接口。
-- 导入 TD3 类仅用于参数结构兼容, 不执行策略学习。
-- 输出数据通常作为 TD3_offline.py 的训练输入。
+- 依赖 Simulation/env/landing_env_listen.py 提供 GazeboEnv 交互接口。
+- 输出数据通常作为 scripts/train_offline.py 的训练输入。
 """
 import numpy as np
 import argparse
 import json
 import os
 import time
-from TD3 import TD3
+from pathlib import Path
+
 # 确保这里引用的环境是你修改过那个带 Vision Blocking 的版本
-from landing_env_listen import GazeboEnv  
+from Simulation.env.landing_env_listen import GazeboEnv
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--max_episodes', type=int, default=1000)
-parser.add_argument('--ckpt_dir', type=str, default='./checkpoints/TD3/')
 # 状态维度 3 (位置)
 parser.add_argument('--state_dim', default=3, type=int) 
 parser.add_argument('--action_dim', default=3, type=int)
@@ -50,24 +49,15 @@ args = parser.parse_args()
 # ==========================================
 # 1. 设置保存路径
 # ==========================================
-save_dir = '/home/shiro/work/Landing_new'
-if not os.path.exists(save_dir):
-    try:
-        os.makedirs(save_dir)
-        print(f"创建目录成功: {save_dir}")
-    except OSError as e:
-        print(f"创建目录失败: {e}")
-        # 如果创建失败，回退到当前目录
-        save_dir = '.'
-
-expert_data_file = os.path.join(save_dir, 'expert_data_lstm_left_up.json')
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+save_dir = PROJECT_ROOT / 'data' / 'expert_data'
+expert_data_file = save_dir / 'expert_data_lstm_left_up.json'
 
 def main():
+    save_dir.mkdir(parents=True, exist_ok=True)
+
     # 初始化环境
     env = GazeboEnv("/home/shiro/PX4_Firmware/launch/sandisland.launch", "iris", '0')
-    
-    # 初始化 Agent (占位用，即使不训练也需要初始化参数)
-    agent = TD3(args.state_dim, args.action_dim, args.max_action, args.capacity, args)
 
     # 注意：在追加模式下，我们不需要全局列表 all_episodes_data 了
     print(f"===== 开始采集 =====")
@@ -135,7 +125,7 @@ def main():
             # [核心修改]：追加写入文件 (Append Mode)
             # 每一行都是一个完整的 List (代表一个回合)
             try:
-                with open(expert_data_file, 'a', encoding='utf-8') as f:
+                with expert_data_file.open('a', encoding='utf-8') as f:
                     f.write(json.dumps(current_episode_data) + "\n") 
             except Exception as e:
                 print(f"[Error] 写入文件失败: {e}")

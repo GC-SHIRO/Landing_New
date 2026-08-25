@@ -11,7 +11,10 @@
 """
 import json
 import sys
+from pathlib import Path
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 def load_episodes(path):
     episodes = []
@@ -131,6 +134,7 @@ def steps_success_mask(steps):
     return np.array([s.get("success", False) for s in steps])
 
 if __name__ == "__main__":
-    paths = sys.argv[1:] or ["expert_data_dynamic/random_dynamic_privileged_pd.jsonl",
-                             "expert_data_dynamic/random_dynamic_privileged_pd_all.jsonl"]
+    paths = sys.argv[1:] or [
+        str(PROJECT_ROOT / "data" / "expert_global" / "global_expert.jsonl")
+    ]
     main(paths)

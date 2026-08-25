@@ -22,10 +22,13 @@ import csv
 import json
 import math
 import os
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # -----------------------------
@@ -406,7 +409,7 @@ def write_csv(path: str, rows: List[List[Any]]) -> None:
 
 def main():
     ap = argparse.ArgumentParser("Analyze expert demos (episode JSON arrays) -> summary + csv")
-    ap.add_argument("--input", default="/home/herbertlin/桌面/work/Landing_new/expert_data_lstm.json",
+    ap.add_argument("--input", default=str(PROJECT_ROOT / "data" / "expert_data" / "expert_data_lstm.json"),
                     help="Path to episode .json/.jsonl OR directory containing them")
     ap.add_argument("--out_dir", default="/home/herbertlin/桌面/work/Landing_new/experdateanl", help="Output directory")
     ap.add_argument("--dt", type=float, default=0.1, help="Seconds per step (for time stats)")

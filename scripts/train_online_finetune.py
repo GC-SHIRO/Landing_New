@@ -5,7 +5,7 @@
 - 在离线 TD3-BC(LSTM+Attention) 权重基础上, 继续进行仿真在线微调训练。
 
 用法:
-- python TD3_online_finetune.py --ckpt_dir <offline_ckpt_dir> --load_step 80000
+- python -m scripts.train_online_finetune --ckpt_dir <offline_ckpt_dir> --load_step 80000
 - 可选: --online_ckpt_dir <save_dir> --offline_data_path <expert.json/jsonl> --env_module landing_env_listen
 
 实现方式:
@@ -15,13 +15,14 @@
 - 每步按配置执行多次梯度更新, 并定期保存 checkpoint 与 TensorBoard 日志。
 
 依赖关系:
-- 依赖 TD3_offline.py 提供 OfflineTD3BCLSTM、Args、数据加载与归一化工具。
-- 依赖 landing_env.py 或 landing_env_listen.py 提供 GazeboEnv。
+- 依赖 model/td3_offline.py 提供模型、数据加载与归一化工具。
+- 依赖 Simulation/env/ 中的旧版环境或监听环境。
 """
 
 import os
 import argparse
 import importlib
+from pathlib import Path
 from collections import deque
 from typing import List
 
@@ -29,7 +30,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from TD3_offline import (
+from model.td3_offline import (
     Args,
     OfflineTD3BCLSTM,
     read_offline_episodes,
@@ -37,20 +38,32 @@ from TD3_offline import (
     fill_buffer_from_episodes,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_MODULES = {
+    "landing_env_old": "Simulation.env.landing_env_old",
+    "landing_env_listen": "Simulation.env.landing_env_listen",
+}
+
 
 def parse_args():
     p = argparse.ArgumentParser("TD3 online finetune after offline pretraining")
 
     p.add_argument("--ckpt_dir",
                    type=str,
-                   default="./checkpoints/TD3/LSTM",
+                   default=str(PROJECT_ROOT / "checkpoints" / "TD3" / "LSTM"),
                    help="offline checkpoint dir containing actor/critic and state_mean/std")
     p.add_argument("--load_step", type=int,
                    default=60000,
                    help="offline checkpoint step to load")
     p.add_argument("--online_ckpt_dir", type=str, default="", help="save dir for online finetuned checkpoints")
 
-    p.add_argument("--env_module", type=str, default="landing_env", choices=["landing_env", "landing_env_listen"], help="which env module to import GazeboEnv from")
+    p.add_argument(
+        "--env_module",
+        type=str,
+        default="landing_env_old",
+        choices=sorted(ENV_MODULES),
+        help="选择在线微调使用的仿真环境",
+    )
     p.add_argument("--launchfile", type=str, default="/home/shiro/PX4_Firmware/launch/sandisland.launch")
     p.add_argument("--vehicle_type", type=str, default="iris")
     p.add_argument("--vehicle_id", type=str, default="0")
@@ -194,7 +207,7 @@ def main():
         added = fill_buffer_from_episodes(agent, episodes_norm)
         print(f"[Buffer] preload expert sequences: +{added}, size={len(agent.buffer)}")
 
-    env_mod = importlib.import_module(args.env_module)
+    env_mod = importlib.import_module(ENV_MODULES[args.env_module])
     GazeboEnv = getattr(env_mod, "GazeboEnv")
     env = GazeboEnv(args.launchfile, args.vehicle_type, args.vehicle_id)
 

@@ -2,13 +2,9 @@
 # -*- coding: utf-8 -*-
 """离线测试 TD3 数据连续性和 SEARCH 数据约束。"""
 
-import os
-import sys
 import unittest
 
 import numpy as np
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from Sampling.validate_expert_data import validate_dataset
 

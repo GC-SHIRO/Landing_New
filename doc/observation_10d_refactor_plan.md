@@ -22,7 +22,7 @@ observation = [position_x, position_y, position_z,
 3. 已完成：采集器以固定控制周期 `TIME_DELTA=0.1s` 对连续有效视觉位置做一阶、二阶差分，并检查有限值及限幅。
 4. 已完成：第 0 个有效视觉帧速度、加速度均为零；第 1 帧只计算速度、加速度为零；从第 2 帧开始计算加速度。历史不会跨 episode 复用。
 5. 已完成：失检时位置保持最近有效视觉位置，速度、加速度和置信度置零；恢复后的首帧不计算跨失检段加速度。
-6. 已完成：`TD3-main/TD3_offline.py` 与 `Simulation/step_env.py` 默认 `state_dim=10`，采集和评估复用同一 observation 构造规则；数据验证器、测试样本、README 与训练命令同步更新。transition 的五个核心字段和 `seq_len=8` 保持不变。
+6. 已完成：`model/td3_offline.py` 与 `Simulation/step_env.py` 默认 `state_dim=10`，采集和评估复用同一 observation 构造规则；数据验证器、测试样本、README 与训练命令同步更新。transition 的五个核心字段和 `seq_len=8` 保持不变。
 7. 待完成：使用带真实置信度的新文件重新采集正式训练数据；不与旧三维数据混写。完成离线检查和小规模训练后，再由使用者手动进行仿真验证。
 
 ## 3. 旧数据处理边界

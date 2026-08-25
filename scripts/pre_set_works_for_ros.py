@@ -24,7 +24,7 @@ from geometry_msgs.msg import TwistStamped
 from gazebo_msgs.msg import ModelStates, ModelState
 # from landing.msg import center
 from pyquaternion import Quaternion
-from drone import *
+from Simulation.env.drone import *
 import time
 import argparse
 
@@ -283,4 +283,3 @@ def get_best_score(acc_reward_history):
     average = average/(int(len(acc_reward_history)/2))
     return average
 # def get_drone_height()
-

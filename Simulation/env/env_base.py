@@ -9,7 +9,7 @@
   飞机起飞失败(电机怠速、慢速转旋翼)的问题。
 
 用法:
-- from env_base import GazeboEnv
+- from Simulation.env.env_base import GazeboEnv
 - 典型流程: env = GazeboEnv(...); obs = env.reset(); obs2, done, success, info = env.step(action)。
 
 依赖关系:

@@ -3,6 +3,10 @@ __pycache__/
 
 .claude/settings.local.json
 .DS_Store
-expert_data_dynamic/*.jsonl
-/checkpoints/
+/data/expert_global/*
+!/data/expert_global/.gitkeep
+/data/evaluation/*
+!/data/evaluation/.gitkeep
+/checkpoints/*
+!/checkpoints/.gitkeep
 *.pre_10d_backup

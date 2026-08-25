@@ -21,7 +21,7 @@ from pyquaternion import Quaternion
 from std_msgs.msg import String
 
 
-from drone import *
+from Simulation.env.drone import *
 # 定义常量
 COLLISION_DIST = 0.35
 # TIME_DELTA = 0.1  <-- 我们不再依赖固定的时间间隔，而是依赖视觉更新

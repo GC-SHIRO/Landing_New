@@ -7,15 +7,15 @@
 
 用法:
 - IDE 运行: 修改 IDE_RUN_NAME、ckpt_dir 等参数后直接运行。
-- 命令行运行: python evaluate_iros_new.py --test_episodes N --ckpt_dir <dir> --load_step <k>
+- 命令行运行: python -m scripts.evaluate_iros --test_episodes N --ckpt_dir <dir> --load_step <k>
 
 实现方式:
 - 每回合执行策略并实时记录, 回合结束立即写入 jsonl/csv, 避免中断导致数据丢失。
 - 支持自动/手动断点续跑, 并统计稳定后末态误差、时间效率、平滑性等指标。
 
 依赖关系:
-- 依赖 TD3_offline.py 中 TD3 封装加载策略权重。
-- 依赖 landing_env.py 与 ROS/Gazebo 交互。
+- 依赖 model/td3_offline.py 中 TD3 封装加载策略权重。
+- 依赖 Simulation/env/landing_env_old.py 与 ROS/Gazebo 交互。
 - 输出数据供 analyze_eval_results.py 二次汇总。
 """
 
@@ -23,15 +23,18 @@ import os
 import time
 import json
 import argparse
+from pathlib import Path
 from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 
-from TD3_offline import TD3
+from model.td3_offline import TD3
 
-from landing_env import GazeboEnv
+from Simulation.env.landing_env_old import GazeboEnv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ================= 配置部分（母板结构，字段保留） =================
@@ -39,12 +42,12 @@ parser = argparse.ArgumentParser(description="IROS Eval (robust per-episode writ
 
 parser.add_argument('--test_episodes', type=int, default=102, help='计划测试回合数（可中断后续跑）')
 parser.add_argument('--save_data_path', type=str,
-                    default='./Landing_new/evaluation_data/TD3_LSTM',
+                    default=str(PROJECT_ROOT / 'data' / 'evaluation' / 'TD3_LSTM'),
                     help='数据保存路径')
 
 # ✅ 默认改成与你训练时一致的 ckpt_dir（非常关键）
 parser.add_argument('--ckpt_dir', type=str,
-                    default='/home/shiro/Landing_new/checkpoints/TD3/LSTM',
+                    default=str(PROJECT_ROOT / 'checkpoints' / 'TD3' / 'LSTM'),
                     help='模型权重文件夹路径')
 parser.add_argument('--load_step', type=int, default=60000, help='加载哪一步的模型权重')
 
@@ -53,7 +56,7 @@ parser.add_argument('--action_dim', default=3, type=int)
 parser.add_argument('--max_action', default=1.0, type=float)
 parser.add_argument('--capacity', default=65536, type=int)
 
-# 母板字段：保留，但绝对不要传入 TD3_offline.Args
+# 母板字段：保留，但绝对不要传入 model.td3_offline.Args
 parser.add_argument('--learning_rate', default=3e-4, type=float)
 
 parser.add_argument('--policy_noise', default=0.0, type=float)  # 评估时建议 0

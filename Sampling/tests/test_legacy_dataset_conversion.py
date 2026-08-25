@@ -3,19 +3,13 @@
 """离线测试旧三维 JSONL 转换脚本。"""
 
 import json
-import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts"))
-)
-
-from convert_legacy_3d_dataset import convert_episode, convert_file_inplace
+from scripts.convert_legacy_3d_dataset import convert_episode, convert_file_inplace
 
 
 def _legacy_episode():
