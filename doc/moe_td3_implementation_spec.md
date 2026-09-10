@@ -2,7 +2,7 @@
 
 ## 1. 目标与边界
 
-本规格定义将 `model/moe_td3.py` 从当前的 TD3-BC/LSTM 副本改造成
+本规格记录将 `model/moe_td3.py` 从原有 TD3-BC/LSTM 副本改造成
 **Causal Transformer + 阶段 Router + 五专家 Actor** 的离线 TD3-BC 模型。
 
 第一版的目标是验证“阶段监督的多专家 Actor”是否优于同样十维输入的单头模型，
@@ -21,9 +21,9 @@
 学习式 detection-age 估计和 Critic 的 phase embedding。它们只有在第一版 MoE
 数据与离线结果成立后才单独讨论。
 
-## 2. 当前代码事实与迁移目标
+## 2. 改造前基线与实现目标
 
-当前 `model/moe_td3.py` 只有文件头说明不同，网络和训练逻辑仍是
+改造前的 `model/moe_td3.py` 只有文件头说明不同，网络和训练逻辑来自
 `model/td3_offline.py` 的 LSTM + feature attention TD3-BC：
 
 ```text
@@ -135,7 +135,8 @@ metadata 的旧 `normalize_episodes` 结果作为 MoE buffer 输入。
 
 调用 `prepared.save(directory)` 保存 `state_mean.npy`、`state_std.npy` 和
 `data_split.json`（episode 索引、序列长度、阶段计数）。后续 Stage 复用这份统计与
-划分，不重新拟合归一化。当前仅提供共用函数，Stage 0/1/2 训练入口尚未接入。
+划分，不重新拟合归一化。Stage 0/1/2 独立入口已在 `scripts/train/` 接入，
+后两阶段从上游存档恢复这份数据记录，并核对源文件 SHA256 以免套用错误索引。
 
 ## 4. 模型结构
 
@@ -253,7 +254,8 @@ Critic 是单独消融，不应混进第一版。
 专家头。目的不是复用 LSTM 权重（两者结构不兼容），而是取得 Transformer 的可比较
 基线，以及可复制到五个专家头的 action head 初始化。
 
-输出 checkpoint 单独置于 `checkpoints/MoE_TD3/single_head`。
+当前独立脚本将 checkpoint 放在 `checkpoints/MoE_TD3/<实验名>/stage0`，
+Stage 1/2 分别保存到同一实验下的 `stage1`、`stage2`，共用统计保存到 `shared`。
 
 ### 5.2 Stage 1：阶段监督预训练
 
@@ -307,10 +309,14 @@ seq_len、hidden_dim、layers、heads、n_phases、标签映射版本和归一�
 | 文件                                      | 修改                                                                        |
 | ----------------------------------------- | --------------------------------------------------------------------------- |
 | `model/moe_td3.py`                      | 重写为 Transformer MoE 模型、phase-aware replay、数据读取与 checkpoint。    |
-| `scripts/train_moe_td3.py`              | 新增独立 Stage 0/1/2 训练入口，不修改旧训练脚本。                           |
-| `Sampling/validate_expert_data.py`      | 增加可选 MoE phase 完整性和合法转移检查；原 10D 基础检查保留。              |
-| `Sampling/tests/test_moe_phase_data.py` | 新增 phase 映射、未知标签、跨阶段非法跳转和窗口对齐离线测试。               |
-| `model/tests/test_moe_td3.py`           | 新增模型 shape、causal、mask、loss 与 checkpoint 测试。                     |
+| `scripts/train/stage0_single_head.py`   | 单头 Transformer TD3-BC 训练入口。 |
+| `scripts/train/stage1_pretrain.py`      | Router 与五专家监督预训练入口。 |
+| `scripts/train/stage2_joint.py`         | 联合 MoE TD3-BC 训练入口。 |
+| `scripts/train/common.py`              | 数据恢复、离线指标、训练日志、阶段衔接和存档/续训。 |
+| `Sampling/validate_expert_data.py`      | 保留原 10D 基础检查，按当前约定不增加全面审核。 |
+| `model/tests/test_moe_phase_transitions.py` | 专家转移、mask 和版本检查。 |
+| `model/tests/test_moe_replay_data.py`   | 终止窗口、TD3 目标和数据划分测试。 |
+| `model/tests/test_moe_training_stages.py` | 单头复制、阶段冻结、三脚本串联、顺序评估与续训测试。 |
 | `Sampling/README.md`                    | MoE 数据前置条件与独立训练命令在实现完成后同步。                            |
 | `Simulation/step_env_moe.py`            | **后续单独新增**；只有离线训练验证后才实现，旧 `step_env.py` 不改。 |
 
@@ -347,3 +353,12 @@ Gazebo 行为或动态平台降落安全。完成离线训练后，再由使用�
 4. 实现 Stage 2 的 TD3 target、联合损失、日志和独立训练入口；
 5. 用正式 10D 数据依次训练 LSTM、单头 Transformer、MoE，比较相同协议下的离线指标；
 6. 离线结果和 checkpoint 完整性通过后，另行计划仿真推理适配与人工仿真验证。
+
+## 9. 当前实现进度（2026-09-10）
+
+三个独立入口和共用工具已经实现。Stage 0 使用单头 Actor；Stage 1 复制 encoder 和
+五动作头，默认冻结 encoder 并保留 Critic；Stage 2 解冻并重新配置优化器、同步目标网络。
+同阶段续训恢复目标网络、优化器与随机状态，不等同于新阶段初始化。
+JSONL 指标包含逐专家 BC、Router 混淆矩阵，以及 soft/hard 和自身阶段顺序评估。
+实现细节和运行命令见 `scripts/train/README.md`。已用合成数据验证阶段衔接，
+正式数据训练、收敛比较和仿真验证仍待执行。

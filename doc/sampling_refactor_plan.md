@@ -710,3 +710,11 @@ MoE 转移表按当前 Sampling 的连续稳定两步配置修正，允许跟踪
 采集器控制律、phase 标签与数据输出保持现状，不追加全面的数据审核流程。
 具体转移表和配置前提见 `doc/moe_td3_implementation_spec.md`；新增离线回归测试
 直接调用全局专家验证转移、replay 装载和 Router mask，不启动仿真。
+
+## 18. MoE 三阶段训练入口（2026-09-10）
+
+训练脚本拆分为 `scripts/train/stage0_single_head.py`、`stage1_pretrain.py` 和
+`stage2_joint.py`，共用 `common.py` 的数据、指标和存档工具。Stage 0 创建按 episode
+划分的数据记录，Stage 1/2 复用相同统计和索引。终止样本继续由 MoE 训练侧保留；
+采集器输出和 LSTM 基线接口保持不变。三个入口只做离线训练，运行方式见
+`scripts/train/README.md`。

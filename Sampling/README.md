@@ -93,7 +93,16 @@ MoE 数据消费说明：`model/moe_td3.py` 使用 32 帧历史，保留完整�
 transition，因此 N 步回合产生 `max(0, N-32+1)` 个训练窗口。成功奖励 `+300`、
 终止动作和 `done=True` 会进入训练；不需要 Sampling 复制终止帧或修改奖励。
 各 Stage 共用的 `prepare_offline_data` 按 episode 划分训练/验证集，仅从训练集计算
-归一化统计。MoE 独立训练入口尚未实现；现有 LSTM 训练入口和数据消费行为保持现状。
+归一化统计。MoE 三阶段训练入口已放在 `scripts/train/`，依次执行：
+
+```bash
+python -m scripts.train.stage0_single_head
+python -m scripts.train.stage1_pretrain
+python -m scripts.train.stage2_joint
+```
+
+先修改各脚本顶部的数据、实验目录和训练参数，详见 [MoE 训练说明](../scripts/train/README.md)。
+后两阶段复用上游存档的数据划分和归一化统计；现有 LSTM 入口和数据消费行为保持现状。
 
 ## marker 丢失处理
 

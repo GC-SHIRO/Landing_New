@@ -29,10 +29,10 @@ PHASE_MAPPING_VERSION = "v1-align-track-descend-touchdown-search"
 PHASE_TRANSITION_VERSION = "v2-sampling-stable-two-steps"
 
 # 采集器已有标签到 MoE 内部阶段的唯一映射；索引是 checkpoint 契约的一部分。
-PHASE_NAMES: Tuple[str, ...] = (
+PHASE_NAMES = (
     "APPROACH", "MATCH", "DESCEND", "TOUCHDOWN", "SEARCH"
 )
-EXPERT_PHASE_TO_INDEX: Mapping[str, int] = {
+EXPERT_PHASE_TO_INDEX = {
     "ALIGN": 0,
     "TRACK": 1,
     "DESCEND": 2,
@@ -59,35 +59,35 @@ class Args:
     """MoE 训练参数；常用项集中于此，避免散落在训练循环。"""
 
     # 数据接口：必须与当前十维采集器一致。
-    state_dim: int = 10
-    action_dim: int = 3
-    max_action: float = 1.0
-    seq_len: int = 32
-    validation_fraction: float = 0.2
+    state_dim: int = 10                 # state的维度
+    action_dim: int = 3                 # action的维度
+    max_action: float = 1.0             # 最大动作
+    seq_len: int = 32                   # 观测序列长度
+    validation_fraction: float = 0.2    # 训练/验证集划分比例
 
     # Causal Transformer 与 Router。
-    hidden_dim: int = 256
-    transformer_layers: int = 2
-    transformer_heads: int = 4
-    transformer_ffn_dim: int = 512
-    dropout_p: float = 0.1
-    n_phases: int = len(PHASE_NAMES)
-    router_hidden_dim: int = 64
-    router_temperature: float = 1.0
+    hidden_dim: int = 256               # Transformer 隐藏层维度
+    transformer_layers: int = 2         # Transformer 层数
+    transformer_heads: int = 4          # Transformer 多头注意力头数
+    transformer_ffn_dim: int = 512      # Transformer 前馈网络维度
+    dropout_p: float = 0.1              # Transformer dropout 概率
+    n_phases: int = len(PHASE_NAMES)    # 阶段数量
+    router_hidden_dim: int = 64         # Router 隐藏层维度
+    router_temperature: float = 1.0     # Router softmax 温度
 
-    # TD3。
-    gamma: float = 0.99
-    tau: float = 0.005
-    policy_delay: int = 2
-    policy_noise: float = 0.2
-    noise_clip: float = 0.5
+    # TD3
+    gamma: float = 0.99                 # 折扣因子（此项的具体作用为 TD3 目标值计算，影响未来奖励的折现）
+    tau: float = 0.005                  # 软更新系数
+    policy_delay: int = 2               # 策略延迟更新步数 （延迟相对于 critic 更新的频率，通常为 2）
+    policy_noise: float = 0.2           # 策略添加噪声的标准差（用于目标动作的平滑处理，防止过度拟合）
+    noise_clip: float = 0.5             # 噪声裁剪范围（用于限制目标动作噪声的幅度，防止过大扰动）
     lr_actor: float = 1e-4
     lr_critic: float = 1e-3
-    weight_decay: float = 1e-4
+    weight_decay: float = 1e-4          # 权重衰减（L2正则化系数，用于防止过拟合）
     batch_size: int = 64
-    training_steps: int = 100_000
-    grad_clip: float = 1.0
-    state_noise_std: float = 0.0
+    training_steps: int = 100000
+    grad_clip: float = 1.0              # 梯度裁剪阈值（用于限制梯度的最大范数，防止梯度爆炸）
+    state_noise_std: float = 0.0        # 状态噪声标准差（用于在训练过程中对状态进行扰动，增加鲁棒性）
 
     # 阶段监督与 TD3-BC。
     bc_weight_init: float = 1.0
@@ -97,6 +97,9 @@ class Args:
     td3bc_alpha: float = 2.5
     router_loss_weight: float = 1.0
     switch_loss_weight: float = 0.01
+    pretrain_freeze_encoder: bool = True
+    pretrain_encoder_lr_scale: float = 0.1
+    pretrain_bc_weight: float = 1.0
 
     # 存储。
     capacity: int = 200_000
@@ -541,6 +544,24 @@ class ExpertHeads(nn.Module):
         return torch.tanh(torch.stack([head(hidden) for head in self.heads], dim=1)) * self.max_action
 
 
+class SingleHeadActor(nn.Module):
+    """Stage 0 通用动作头；层形状与五专家头一致，便于直接复制参数。"""
+
+    def __init__(self, args: Args):
+        super().__init__()
+        self.encoder = CausalTransformerEncoder(
+            args.state_dim, args.hidden_dim, args.transformer_layers, args.transformer_heads,
+            args.transformer_ffn_dim, args.dropout_p, args.seq_len,
+        )
+        self.head = nn.Sequential(nn.Linear(args.hidden_dim, 64), nn.ReLU(inplace=True),
+                                  nn.Linear(64, args.action_dim))
+        self.max_action = args.max_action
+
+    def forward(self, state_sequence: torch.Tensor, previous_phase=None, mode="soft"):
+        hidden = self.encoder(state_sequence)[:, -1]
+        return {"action": torch.tanh(self.head(hidden)) * self.max_action}
+
+
 class MoEActor(nn.Module):
     """共享 Causal Transformer、阶段 Router 与五个 Actor 专家头。"""
 
@@ -597,12 +618,13 @@ class CriticTransformer(nn.Module):
 class OfflineMoETD3BC:
     """包含 Router 监督、专家 BC 与 TD3 更新的离线训练器。"""
 
-    def __init__(self, args: Args):
+    def __init__(self, args: Args, single_head: bool = False):
         args.validate()
         self.args = args
+        self.single_head = single_head
         self.state_dim, self.action_dim = args.state_dim, args.action_dim
         self.max_action, self.seq_len = float(args.max_action), args.seq_len
-        self.actor = MoEActor(args).to(device)
+        self.actor = (SingleHeadActor(args) if single_head else MoEActor(args)).to(device)
         self.actor_target = copy.deepcopy(self.actor).to(device)
         self.critic1 = CriticTransformer(args).to(device)
         self.critic1_target = copy.deepcopy(self.critic1).to(device)
@@ -621,6 +643,73 @@ class OfflineMoETD3BC:
             "actor_loss": 0.0, "bc_loss": 0.0, "td3_loss": 0.0,
             "router_loss": 0.0, "switch_loss": 0.0, "lambda": 0.0, "router_accuracy": 0.0,
         }
+
+    def sync_targets(self) -> None:
+        """进入新阶段时同步目标网络；同阶段续训则应恢复保存的目标网络。"""
+        for name in ("actor", "critic1", "critic2"):
+            target = getattr(self, name + "_target")
+            target.load_state_dict(getattr(self, name).state_dict())
+            target.eval()
+
+    def initialize_from_single_head(self, actor_state: Mapping[str, torch.Tensor]) -> None:
+        """将已训练的单头 encoder 和动作头复制到 MoE，Router 保持新初始化。"""
+        if self.single_head:
+            raise ValueError("只有 MoE Actor 可以接收单头初始化")
+        source = SingleHeadActor(self.args).to(device)
+        source.load_state_dict(actor_state)
+        self.actor.encoder.load_state_dict(source.encoder.state_dict())
+        for head in self.actor.experts.heads:
+            head.load_state_dict(source.head.state_dict())
+        self.sync_targets()
+
+    def configure_pretraining(self, phase_counts: np.ndarray) -> None:
+        """Stage 1 只训练 Actor；类别缺样权重置零，避免倒数频率出现除零。"""
+        if self.single_head:
+            raise ValueError("单头模型不能进行阶段监督预训练")
+        if not self.args.pretrain_freeze_encoder and self.args.pretrain_encoder_lr_scale <= 0:
+            raise ValueError("预训练 encoder 学习率比例必须大于 0")
+        counts = np.asarray(phase_counts, dtype=np.float64)
+        weights = np.zeros_like(counts)
+        present = counts > 0
+        if not present.any():
+            raise ValueError("训练集没有可用于阶段监督的窗口")
+        weights[present] = 1.0 / counts[present]
+        weights[present] /= weights[present].mean()
+        self.router_class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
+        self.actor.encoder.requires_grad_(not self.args.pretrain_freeze_encoder)
+        for critic in (self.critic1, self.critic2):
+            critic.requires_grad_(False)
+            critic.eval()
+        groups = [{"params": list(self.actor.router.parameters()) + list(self.actor.experts.parameters()),
+                   "lr": self.args.lr_actor}]
+        if not self.args.pretrain_freeze_encoder:
+            groups.append({"params": self.actor.encoder.parameters(),
+                           "lr": self.args.lr_actor * self.args.pretrain_encoder_lr_scale})
+        self.actor_optimizer = optim.Adam(groups, weight_decay=self.args.weight_decay)
+
+    def pretrain_one_step(self) -> Dict[str, float]:
+        """阶段标签监督路由，只有标签对应的动作头直接参与 BC。"""
+        self.actor.train()
+        if self.args.pretrain_freeze_encoder:
+            self.actor.encoder.eval()
+        batch = self.buffer.sample(self.args.batch_size)
+        state = torch.as_tensor(batch["s"], device=device)
+        phase = torch.as_tensor(batch["phase"][:, 0], device=device)
+        previous = torch.as_tensor(batch["phase_previous"][:, 0], device=device)
+        action = torch.as_tensor(batch["a"][:, -1], device=device)
+        output = self.actor(state, previous)
+        bc = F.mse_loss(self._expert_action_for_phase(output["all_actions"], phase), action)
+        ce = F.cross_entropy(output["logits"], phase, weight=self.router_class_weights)
+        loss = self.args.pretrain_bc_weight * bc + self.args.router_loss_weight * ce
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if self.args.grad_clip > 0:
+            nn.utils.clip_grad_norm_(self.actor.parameters(), self.args.grad_clip)
+        self.actor_optimizer.step()
+        self.train_step += 1
+        return {"step": float(self.train_step), "actor_loss": loss.item(), "bc_loss": bc.item(),
+                "router_loss": ce.item(),
+                "router_accuracy": (output["selected_phase"] == phase).float().mean().item()}
 
     @staticmethod
     def _soft_update(network: nn.Module, target: nn.Module, tau: float) -> None:
@@ -667,7 +756,7 @@ class OfflineMoETD3BC:
         self.actor.eval()
         output = self.actor(sequence_tensor, previous, mode=mode)
         action = output["action"].squeeze(0).cpu().numpy()
-        selected_phase = int(output["selected_phase"].item())
+        selected_phase = 0 if self.single_head else int(output["selected_phase"].item())
         if noise > 0.0:
             action += np.random.normal(0.0, float(noise), size=action.shape).astype(np.float32)
         self.actor.train(was_training)
@@ -738,11 +827,16 @@ class OfflineMoETD3BC:
             else:
                 adaptive_lambda = 1.0
             td3_loss = -adaptive_lambda * q_policy.mean()
-            bc_loss = F.mse_loss(self._expert_action_for_phase(output["all_actions"], phase), action[:, -1, :])
-            router_loss = F.cross_entropy(output["logits"], phase)
-            # 倒数第二 token 只用到它之前的因果历史，使用真实 p[t-2] 的转移 mask。
-            _, previous_weights = self.actor.router(output["hidden_sequence"][:, -2, :], phase_sequence[:, -3])
-            switch_loss = F.mse_loss(output["weights"], previous_weights)
+            if self.single_head:
+                bc_loss = F.mse_loss(output["action"], action[:, -1, :])
+                router_loss = state.new_zeros(())
+                switch_loss = state.new_zeros(())
+            else:
+                bc_loss = F.mse_loss(self._expert_action_for_phase(output["all_actions"], phase), action[:, -1, :])
+                router_loss = F.cross_entropy(output["logits"], phase)
+                # 倒数第二 token 只用到它之前的因果历史，使用真实 p[t-2] 的转移 mask。
+                _, previous_weights = self.actor.router(output["hidden_sequence"][:, -2, :], phase_sequence[:, -3])
+                switch_loss = F.mse_loss(output["weights"], previous_weights)
             actor_loss = td3_loss + bc_weight * bc_loss + self.args.router_loss_weight * router_loss + self.args.switch_loss_weight * switch_loss
             self.actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
@@ -752,7 +846,7 @@ class OfflineMoETD3BC:
             self._soft_update(self.actor, self.actor_target, self.args.tau)
             self._soft_update(self.critic1, self.critic1_target, self.args.tau)
             self._soft_update(self.critic2, self.critic2_target, self.args.tau)
-            router_accuracy = (output["selected_phase"] == phase).float().mean()
+            router_accuracy = state.new_zeros(()) if self.single_head else (output["selected_phase"] == phase).float().mean()
             self.last_actor_info = {
                 "actor_loss": float(actor_loss.item()), "bc_loss": float(bc_loss.item()),
                 "td3_loss": float(td3_loss.item()), "router_loss": float(router_loss.item()),
@@ -766,6 +860,7 @@ class OfflineMoETD3BC:
 
     def _checkpoint_metadata(self) -> Dict[str, Any]:
         return {
+            "actor_kind": "single_head" if self.single_head else "moe",
             "phase_mapping_version": PHASE_MAPPING_VERSION, "phase_names": list(PHASE_NAMES),
             "phase_transition_version": PHASE_TRANSITION_VERSION,
             "state_dim": self.args.state_dim, "action_dim": self.args.action_dim,
@@ -793,7 +888,7 @@ class OfflineMoETD3BC:
             metadata = json.load(input_file)
         expected = self._checkpoint_metadata()
         # 转移表也是持久化 buffer；拒绝旧版本，避免加载权重时把修正后的表覆盖回去。
-        for key in ("phase_mapping_version", "phase_transition_version", "phase_names", "state_dim", "action_dim", "seq_len",
+        for key in ("actor_kind", "phase_mapping_version", "phase_transition_version", "phase_names", "state_dim", "action_dim", "seq_len",
                     "hidden_dim", "transformer_layers", "transformer_heads", "n_phases"):
             if metadata.get(key) != expected[key]:
                 raise ValueError(f"MoE checkpoint {key} 不匹配: {metadata.get(key)!r} != {expected[key]!r}")

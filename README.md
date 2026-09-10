@@ -8,6 +8,7 @@ TD3-BC 离线训练、在线微调和仿真评估。
 ```text
 model/                  模型、回放池和离线数据接口
 scripts/                训练、评估和数据处理入口
+scripts/train/          MoE 三阶段独立离线训练脚本
 Simulation/             动态平台仿真与评估逻辑
 Simulation/env/         仿真环境及飞控通信封装
 Sampling/               全局真值专家采集器与离线测试
@@ -48,6 +49,14 @@ python -m Sampling.validate_expert_data
 python -m scripts.train_offline \
   --data_path data/expert_global/global_expert.jsonl \
   --ckpt_dir checkpoints/TD3/global_expert
+```
+
+MoE 三阶段训练（先修改各脚本顶部参数，详见 [训练说明](scripts/train/README.md)）：
+
+```bash
+python -m scripts.train.stage0_single_head
+python -m scripts.train.stage1_pretrain
+python -m scripts.train.stage2_joint
 ```
 
 在线微调：
