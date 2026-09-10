@@ -492,6 +492,10 @@ terminal reward 仍按环境真实结果记录，保证文件语义正确；Samp
 
 本轮不调整 `model/td3_offline.py` 对终止 transition 的使用方式；这是训练侧独立事项，不在 Sampling 重构中绕过或伪造数据。
 
+2026-09-10 MoE 训练侧更新：`model/moe_td3.py` 已单独保留真实终止 transition，
+使用记录的 `next_observation` 构造下一状态窗口，终止样本的 Q 目标直接取即时奖励。
+以上关于终止步被排除的说明仍适用于 LSTM 基线；Sampling 的奖励、动作和输出文件均不改变。
+
 ## 10. 写盘策略
 
 ### training 文件
@@ -698,3 +702,11 @@ python -m scripts.train_offline \
 - 一次短训练的动作拟合报告
 
 新实现已完成离线检查；正式 300 局采集由使用者完成仿真验证后启动。
+
+## 17. MoE 阶段转移对齐（2026-09-06）
+
+MoE 转移表按当前 Sampling 的连续稳定两步配置修正，允许跟踪直接进入近地阶段，
+以及下降、近地阶段重新对准/跟踪和近地阶段随相对高度增大恢复下降。
+采集器控制律、phase 标签与数据输出保持现状，不追加全面的数据审核流程。
+具体转移表和配置前提见 `doc/moe_td3_implementation_spec.md`；新增离线回归测试
+直接调用全局专家验证转移、replay 装载和 Router mask，不启动仿真。

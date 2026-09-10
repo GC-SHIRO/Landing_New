@@ -26,6 +26,7 @@ import torch.optim as optim
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PHASE_MAPPING_VERSION = "v1-align-track-descend-touchdown-search"
+PHASE_TRANSITION_VERSION = "v2-sampling-stable-two-steps"
 
 # 采集器已有标签到 MoE 内部阶段的唯一映射；索引是 checkpoint 契约的一部分。
 PHASE_NAMES: Tuple[str, ...] = (
@@ -39,13 +40,14 @@ EXPERT_PHASE_TO_INDEX: Mapping[str, int] = {
     "SEARCH": 4,
 }
 
-# 行表示上一阶段，列表示当前阶段。SEARCH 是失检恢复路径，不是额外 observation。
+# 行表示上一阶段，列表示当前阶段；对应当前 Sampling 连续稳定两步的配置。
+# 下降和近地阶段仍可能因误差变大而重新对准，近地阶段也可能随高度变化恢复下降。
 _ALLOWED_TRANSITIONS = torch.tensor(
     [
         [True, True, False, False, True],   # APPROACH
-        [True, True, True, False, True],     # MATCH
-        [False, True, True, True, True],     # DESCEND
-        [False, False, False, True, True],   # TOUCHDOWN
+        [True, True, True, True, True],      # MATCH
+        [True, True, True, True, True],      # DESCEND
+        [True, True, True, True, True],      # TOUCHDOWN
         [True, True, False, False, True],    # SEARCH
     ],
     dtype=torch.bool,
@@ -61,6 +63,7 @@ class Args:
     action_dim: int = 3
     max_action: float = 1.0
     seq_len: int = 32
+    validation_fraction: float = 0.2
 
     # Causal Transformer 与 Router。
     hidden_dim: int = 256
@@ -280,6 +283,87 @@ def normalize_episodes(
     return normalized
 
 
+def _window_end_indices(dones: np.ndarray, seq_len: int) -> List[int]:
+    """只取完整历史；终止帧可作窗口末尾，非终止尾帧仍需真实下一阶段。"""
+    indices = []
+    for index in range(seq_len - 1, len(dones)):
+        if np.any(dones[index - seq_len + 1:index]):
+            continue
+        if index == len(dones) - 1 and not bool(dones[index]):
+            continue
+        indices.append(index)
+    return indices
+
+
+@dataclass
+class PreparedOfflineData:
+    """各 Stage 共用的 episode 划分、归一化结果及有效窗口阶段计数。"""
+
+    train_episodes: List[List[Dict[str, Any]]]
+    validation_episodes: List[List[Dict[str, Any]]]
+    mean: np.ndarray
+    std: np.ndarray
+    train_indices: List[int]
+    validation_indices: List[int]
+    train_phase_counts: np.ndarray
+    validation_phase_counts: np.ndarray
+    seq_len: int
+
+    def save(self, directory: str) -> None:
+        """保存一份共用统计与划分记录，后续 Stage 不应重新拟合归一化。"""
+        output_dir = Path(directory)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        np.save(output_dir / "state_mean.npy", self.mean)
+        np.save(output_dir / "state_std.npy", self.std)
+        metadata = {
+            "train_indices": self.train_indices,
+            "validation_indices": self.validation_indices,
+            "seq_len": self.seq_len,
+            "phase_names": list(PHASE_NAMES),
+            "train_phase_counts": self.train_phase_counts.tolist(),
+            "validation_phase_counts": self.validation_phase_counts.tolist(),
+        }
+        (output_dir / "data_split.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+def prepare_offline_data(
+    episodes: Sequence[Sequence[Mapping[str, Any]]], args: Args,
+) -> PreparedOfflineData:
+    """按完整 episode 固定划分，仅从训练集拟合统计；阶段缺样只统计、不报错。"""
+    if len(episodes) < 2:
+        raise ValueError("按 episode 划分训练和验证集至少需要两个回合")
+    if not 0.0 < args.validation_fraction < 1.0:
+        raise ValueError("validation_fraction 必须位于 0 和 1 之间")
+    if args.seq_len < 3:
+        raise ValueError("seq_len 至少为 3")
+    indices = np.random.default_rng(args.seed).permutation(len(episodes))
+    validation_count = min(len(episodes) - 1, max(1, int(len(episodes) * args.validation_fraction)))
+    validation_indices = sorted(indices[:validation_count].tolist())
+    train_indices = sorted(indices[validation_count:].tolist())
+    train_raw = [episodes[index] for index in train_indices]
+    validation_raw = [episodes[index] for index in validation_indices]
+    mean, std = compute_mean_std(train_raw, args.state_dim)
+    train = normalize_episodes(train_raw, mean, std)
+    validation = normalize_episodes(validation_raw, mean, std)
+
+    def phase_counts(split: List[List[Dict[str, Any]]]) -> np.ndarray:
+        counts = np.zeros(len(PHASE_NAMES), dtype=np.int64)
+        for episode in split:
+            dones = np.asarray([step["done"] for step in episode])
+            for index in _window_end_indices(dones, args.seq_len):
+                counts[episode[index]["phase"]] += 1
+        return counts
+
+    return PreparedOfflineData(
+        train_episodes=train, validation_episodes=validation, mean=mean, std=std,
+        train_indices=train_indices, validation_indices=validation_indices,
+        train_phase_counts=phase_counts(train), validation_phase_counts=phase_counts(validation),
+        seq_len=args.seq_len,
+    )
+
+
 class SequenceReplayBuffer:
     """保存不跨 episode 的 state/action/phase 序列窗口。"""
 
@@ -317,7 +401,9 @@ class SequenceReplayBuffer:
             raise ValueError("phase_sequence shape 不匹配")
         if not transition_is_allowed(phase_previous, phase):
             raise ValueError(f"非法阶段转移: {phase_name(phase_previous)} -> {phase_name(phase)}")
-        if not transition_is_allowed(phase, phase_next):
+        if bool(done) and phase_next != -1:
+            raise ValueError("终止样本的 phase_next 必须为 -1，表示不存在下一阶段")
+        if not bool(done) and not transition_is_allowed(phase, phase_next):
             raise ValueError(f"非法阶段转移: {phase_name(phase)} -> {phase_name(phase_next)}")
         index = self.pointer
         self.s[index], self.a[index] = state_sequence, action_sequence
@@ -330,27 +416,26 @@ class SequenceReplayBuffer:
         self.size = min(self.size + 1, self.capacity)
 
     def add_episode(self, states: np.ndarray, actions: np.ndarray, rewards: np.ndarray,
-                    dones: np.ndarray, phases: np.ndarray) -> int:
-        """按滑动窗口写入一个 episode，并保留 current/next phase 对齐关系。"""
+                    dones: np.ndarray, phases: np.ndarray, next_states: np.ndarray) -> int:
+        """按真实 transition 建窗口，保留终止奖励、动作及 next_observation。"""
         total_steps = len(states)
-        if total_steps < self.seq_len + 1:
+        if total_steps < self.seq_len:
             return 0
-        if not (len(actions) == len(rewards) == len(dones) == len(phases) == total_steps):
-            raise ValueError("episode 的 state/action/reward/done/phase 长度不一致")
+        if not (len(actions) == len(rewards) == len(dones) == len(phases) == len(next_states) == total_steps):
+            raise ValueError("episode 的 state/next_state/action/reward/done/phase 长度不一致")
         if np.any((phases < 0) | (phases >= len(PHASE_NAMES))):
             raise ValueError("episode 含非法 phase 索引")
         added = 0
-        for time_index in range(self.seq_len - 1, total_steps - 1):
-            if np.any(dones[time_index - self.seq_len + 1:time_index]):
-                continue
+        for time_index in _window_end_indices(dones, self.seq_len):
             self.add(
                 states[time_index - self.seq_len + 1:time_index + 1],
                 actions[time_index - self.seq_len + 1:time_index + 1],
                 float(rewards[time_index]),
-                states[time_index - self.seq_len + 2:time_index + 2],
+                next_states[time_index - self.seq_len + 1:time_index + 1],
                 float(dones[time_index]),
                 phases[time_index - self.seq_len + 1:time_index + 1],
-                int(phases[time_index - 1]), int(phases[time_index]), int(phases[time_index + 1]),
+                int(phases[time_index - 1]), int(phases[time_index]),
+                -1 if bool(dones[time_index]) else int(phases[time_index + 1]),
             )
             added += 1
         return added
@@ -588,6 +673,30 @@ class OfflineMoETD3BC:
         self.actor.train(was_training)
         return np.clip(action, -self.max_action, self.max_action).astype(np.float32), selected_phase
 
+    @torch.no_grad()
+    def _compute_target_values(self, next_state: torch.Tensor, action: torch.Tensor,
+                               reward: torch.Tensor, done: torch.Tensor,
+                               phase: torch.Tensor) -> torch.Tensor:
+        """终止样本只使用即时奖励，且完全不调用目标网络计算未来价值。"""
+        target_value = reward.clone()
+        continuing = done.squeeze(1) == 0
+        if continuing.any():
+            target_output = self.actor_target(next_state[continuing], phase[continuing], mode="soft")
+            target_last_action = target_output["action"]
+            target_noise = (torch.randn_like(target_last_action) * self.args.policy_noise).clamp(
+                -self.args.noise_clip, self.args.noise_clip
+            )
+            target_last_action = (target_last_action + target_noise).clamp(-self.max_action, self.max_action)
+            target_action_sequence = torch.cat(
+                [action[continuing, 1:, :], target_last_action.unsqueeze(1)], dim=1
+            )
+            target_q = torch.minimum(
+                self.critic1_target(next_state[continuing], target_action_sequence),
+                self.critic2_target(next_state[continuing], target_action_sequence),
+            )
+            target_value[continuing] += self.args.gamma * target_q
+        return target_value
+
     def train_one_step(self) -> Dict[str, float]:
         """执行一次 Critic 更新，按 policy_delay 执行 Actor/Router 更新。"""
         batch = self.buffer.sample(self.args.batch_size)
@@ -602,19 +711,7 @@ class OfflineMoETD3BC:
         state, next_state = self._apply_state_noise(state, next_state)
         bc_weight = linear_anneal(self.train_step, self.args.bc_weight_init, self.args.bc_weight_final, self.args.bc_anneal_steps)
 
-        with torch.no_grad():
-            target_output = self.actor_target(next_state, phase, mode="soft")
-            target_last_action = target_output["action"]
-            target_noise = (torch.randn_like(target_last_action) * self.args.policy_noise).clamp(
-                -self.args.noise_clip, self.args.noise_clip
-            )
-            target_last_action = (target_last_action + target_noise).clamp(-self.max_action, self.max_action)
-            target_action_sequence = torch.cat([action[:, 1:, :], target_last_action.unsqueeze(1)], dim=1)
-            target_q = torch.minimum(
-                self.critic1_target(next_state, target_action_sequence),
-                self.critic2_target(next_state, target_action_sequence),
-            )
-            target_value = reward + (1.0 - done) * self.args.gamma * target_q
+        target_value = self._compute_target_values(next_state, action, reward, done, phase)
 
         q1, q2 = self.critic1(state, action), self.critic2(state, action)
         critic_loss = F.mse_loss(q1, target_value) + F.mse_loss(q2, target_value)
@@ -670,6 +767,7 @@ class OfflineMoETD3BC:
     def _checkpoint_metadata(self) -> Dict[str, Any]:
         return {
             "phase_mapping_version": PHASE_MAPPING_VERSION, "phase_names": list(PHASE_NAMES),
+            "phase_transition_version": PHASE_TRANSITION_VERSION,
             "state_dim": self.args.state_dim, "action_dim": self.args.action_dim,
             "seq_len": self.args.seq_len, "hidden_dim": self.args.hidden_dim,
             "transformer_layers": self.args.transformer_layers,
@@ -694,7 +792,8 @@ class OfflineMoETD3BC:
         with open(metadata_path, "r", encoding="utf-8") as input_file:
             metadata = json.load(input_file)
         expected = self._checkpoint_metadata()
-        for key in ("phase_mapping_version", "phase_names", "state_dim", "action_dim", "seq_len",
+        # 转移表也是持久化 buffer；拒绝旧版本，避免加载权重时把修正后的表覆盖回去。
+        for key in ("phase_mapping_version", "phase_transition_version", "phase_names", "state_dim", "action_dim", "seq_len",
                     "hidden_dim", "transformer_layers", "transformer_heads", "n_phases"):
             if metadata.get(key) != expected[key]:
                 raise ValueError(f"MoE checkpoint {key} 不匹配: {metadata.get(key)!r} != {expected[key]!r}")
@@ -714,13 +813,15 @@ def fill_buffer_from_episodes(agent: OfflineMoETD3BC,
         if not episode:
             continue
         states = np.stack([_to_np(step["observation"]) for step in episode], axis=0)
+        next_states = np.stack([_to_np(step["next_observation"]) for step in episode], axis=0)
         actions = np.stack([_to_np(step["action"]) for step in episode], axis=0)
         rewards = np.asarray([float(step["reward"]) for step in episode], dtype=np.float32)
         dones = np.asarray([float(step["done"]) for step in episode], dtype=np.float32)
         phases = np.asarray([_extract_phase(step) for step in episode], dtype=np.int64)
-        if states.shape[1:] != (agent.state_dim,) or actions.shape[1:] != (agent.action_dim,):
+        if (states.shape[1:] != (agent.state_dim,) or next_states.shape != states.shape
+                or actions.shape[1:] != (agent.action_dim,)):
             raise ValueError(f"episode {episode_index} 的 state_dim 或 action_dim 不匹配")
-        if not np.isfinite(states).all() or not np.isfinite(actions).all():
-            raise ValueError(f"episode {episode_index} 存在非有限 state 或 action")
-        added_total += agent.buffer.add_episode(states, actions, rewards, dones, phases)
+        if not np.isfinite(states).all() or not np.isfinite(next_states).all() or not np.isfinite(actions).all():
+            raise ValueError(f"episode {episode_index} 存在非有限 state、next_state 或 action")
+        added_total += agent.buffer.add_episode(states, actions, rewards, dones, phases, next_states)
     return added_total

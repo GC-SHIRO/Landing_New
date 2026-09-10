@@ -49,8 +49,8 @@
 ```
 
 `T=32` 对应当前采集周期 `0.1s` 的 3.2 秒历史。短于 32 步的**推理**历史通过
-重复首个可用 state 左填充；离线 replay 仍只从长度至少 33 的 episode 生成窗口，
-不伪造训练 transition。
+重复首个可用 state 左填充；离线 replay 从长度至少 32 的完整 episode 生成窗口，
+恰好 32 步时仅生成终止样本，不伪造训练 transition。
 
 ## 3. 固定数据契约
 
@@ -101,25 +101,41 @@ shape = (10,)
 ```text
 s_seq      = s[t-T+1 : t+1]
 a_seq      = a[t-T+1 : t+1]
-s2_seq     = s[t-T+2 : t+2]
+s2_seq     = next_observation[t-T+1 : t+1]
 phase_prev = phase[t-1]
 phase      = phase[t]
-phase_next = phase[t+1]
+phase_next = phase[t+1]（非终止步）；-1（终止步，不存在下一阶段）
 reward     = reward[t]
 done       = done[t]
 ```
 
 `phase` 是当前 Actor 专家头的 BC 标签和 Router CE 标签；`phase_prev` 用于当前
-路由的阶段转移掩码；`phase_next` 用于 target action 在 `s2_seq` 上的转移掩码。
-这三个标签都来自同一个 episode，绝不跨 episode 取值。
+路由的阶段转移掩码。非终止步的 target action 使用当前 `phase` 作为上一阶段；
+`phase_next` 仅用于真实相邻转移校验，不作为 target 的上一阶段。标签只来自同一
+episode；终止步的 `phase_next=-1` 是缺省标记，不能送入 Router 或当作第六类标签。
 
-训练窗口仍排除 episode 最后的 terminal transition：因为 `s2_seq` 需要真实的
-`t+1` observation 和 phase。此行为与现有 buffer 保持一致，不能通过复制 terminal
-step 补齐。
+2026-09-10 修正：MoE replay 保留最后的 terminal transition，直接读取真实
+`next_observation`，不复制 terminal step 或制造下一阶段。普通连续窗口的 `s2_seq`
+仍等价于状态序列右移一帧。终止样本的奖励、done、动作和当前 phase 均参与训练，
+Q 目标直接等于即时奖励，目标 Actor 和目标 Critic 只处理非终止样本。
+完整 N 步回合产生 `max(0, N-T+1)` 个窗口；没有下一阶段的非终止尾帧仍跳过。
+LSTM 基线 `model/td3_offline.py` 保持原行为。
 
 归一化仅处理 observation 和 next_observation，必须显式保留
 `phase_prev`、`phase`、`phase_next`、action、reward、done。不能再使用会直接丢弃
 metadata 的旧 `normalize_episodes` 结果作为 MoE buffer 输入。
+
+### 3.4 各 Stage 共用的数据准备
+
+`prepare_offline_data(episodes, args)` 按完整 episode 固定划分训练/验证集，
+默认 `validation_fraction=0.2`、使用 `args.seed`，至少需两个 episode。
+只用训练集 observation 计算一套 mean/std，训练集和验证集都用它归一化。
+返回 `PreparedOfflineData`，保留划分索引和实际窗口末端的五阶段样本量；
+阶段缺样仅体现为计数 0，不追加严格的数据审核或自动重采样。
+
+调用 `prepared.save(directory)` 保存 `state_mean.npy`、`state_std.npy` 和
+`data_split.json`（episode 索引、序列长度、阶段计数）。后续 Stage 复用这份统计与
+划分，不重新拟合归一化。当前仅提供共用函数，Stage 0/1/2 训练入口尚未接入。
 
 ## 4. 模型结构
 
@@ -186,10 +202,18 @@ a_t = sum_p w_t[p] * a_all[p]
 | previous -> current | APPROACH | MATCH | DESCEND | TOUCHDOWN | SEARCH |
 | ------------------- | -------: | ----: | ------: | --------: | -----: |
 | APPROACH            |       ✓ |    ✓ |       - |         - |     ✓ |
-| MATCH               |       ✓ |    ✓ |      ✓ |         - |     ✓ |
-| DESCEND             |        - |    ✓ |      ✓ |        ✓ |     ✓ |
-| TOUCHDOWN           |        - |     - |       - |        ✓ |     ✓ |
+| MATCH               |       ✓ |    ✓ |      ✓ |        ✓ |     ✓ |
+| DESCEND             |       ✓ |    ✓ |      ✓ |        ✓ |     ✓ |
+| TOUCHDOWN           |       ✓ |    ✓ |      ✓ |        ✓ |     ✓ |
 | SEARCH              |       ✓ |    ✓ |       - |         - |     ✓ |
+
+2026-09-06 最小修正：转移表以当前 Sampling 的 `stable_steps_required=2`、
+`descend_xy_threshold < align_xy_threshold` 为依据。跟踪稳定后可直接进入近地阶段；
+下降与近地阶段遇到误差增大时可重新对准或跟踪，近地阶段也可随相对高度增大恢复下降。
+保留 APPROACH/SEARCH 必须先经过 MATCH 才能下降或触地的限制；
+若以后将稳定步数改为 1，需要重新对齐该限制。此次不改变采集器控制律、动作或标签。
+checkpoint 新增 `phase_transition_version`，拒绝加载旧转移版本，防止权重中的
+Router buffer 恢复旧表。
 
 实现 `allowed_phase_mask(previous_phase)`，对不允许的 logits 加一个足够小的有限值
 （例如 `torch.finfo(dtype).min`），再 softmax。函数必须验证每一行至少有一个允许项。
@@ -198,11 +222,16 @@ a_t = sum_p w_t[p] * a_all[p]
 中的真实高度或速度修改 mask。对低置信度强制 SEARCH、近地失检例外和 HOLD/ABORT
 需要先用可部署的 10D 坐标语义制定并验证后，才能加入；不能现在凭全局真值实现。
 
-数据验证必须额外检查每个 `(phase_prev, phase)` 与 `(phase, phase_next)` 都在此表中。
-若当前专家数据出现表外跳转，应修改标签映射或专家标签生成规则，并重新采集；不能在
-训练时关掉 mask 来迁就数据。
+窗口末端检查 `(phase_prev, phase)`，非终止样本再检查 `(phase, phase_next)`；
+终止步没有下一阶段，不对 `phase_next=-1` 查询转移表。
+当前按用户确认，以已有 Sampling 阶段语义修正转移表，不增加全面的数据审核流程；
+保留 replay 窗口末端的现有转移检查，用专家输出的离线回归测试验证新增路径。
+以后出现表外跳转时先核对采集参数与阶段语义，不在训练时直接关闭 mask。
 
 ### 4.5 Twin Critic
+
+2026-09-06 实施决定：当前保留代码中的 `Q(s_seq, a_seq)`，将逐帧 state/action
+拼接后送入 Transformer；下述仅拼接当前动作的方案留待后续消融实验，本次不修改 Critic。
 
 `CriticTransformer(state_seq, action)` 使用独立 Causal Transformer 的最后 token，
 将其与 `(B, 3)` action 拼接，再由 MLP 输出单个 Q 值。
@@ -236,15 +265,16 @@ Critic 是单独消融，不应混进第一版。
 - Critic 暂不参与更新，Actor encoder 可以冻结或使用更小学习率，具体由 Args 显式控制。
 
 该阶段必须记录每类样本量、Router accuracy、混淆矩阵和五个专家的 BC loss。
-如果某阶段没有样本，应在开始训练前失败，而不是让空专家头默默存在。
+按当前约定，某阶段没有样本时记录计数 0 并提示，不增加训练前强制失败检查；
+该专家的对应阶段 BC 能力不能据此认定已训练完成。
 
 ### 5.3 Stage 2：联合 MoE TD3-BC
 
 解冻 Stage 1 需要训练的模块，保持 Router 监督。对一个 batch：
 
-1. `actor_target(s2_seq, previous_phase=phase, mode="soft")` 产生 target action；
+1. 仅非终止样本调用 `actor_target(s2_seq, previous_phase=phase, mode="soft")` 产生 target action；
 2. 对 target action 加入现有 TD3 clipped Gaussian smoothing，并裁到 action 范围；
-3. `target_q = reward + gamma * (1-done) * min(Q1_target, Q2_target)`；
+3. 非终止样本使用 `reward + gamma * min(Q1_target, Q2_target)`；终止样本直接使用 `reward`，不调用目标网络；
 4. 两个 Critic 最小化各自对 `target_q` 的 MSE；
 5. 每隔 `policy_delay` 步更新 Actor。
 
@@ -300,7 +330,9 @@ seq_len、hidden_dim、layers、heads、n_phases、标签映射版本和归一�
 - soft/hard 动作在 `[-1, 1]`；Router 权重按行求和为 1；
 - 五阶段转移掩码禁止表外阶段，并允许正式标签的相邻转移；
 - phase 的 prev/current/next 与 state/action 窗口末尾严格对齐且不跨 episode；
-- 缺失、未知 phase 和空阶段数据会在训练前给出中文错误；
+- 缺失、未知 phase 给出中文错误；空阶段数据只记录计数 0；
+- 终止窗口保留真实 reward/action/next_observation，目标网络仅处理非终止样本；
+- episode 划分可复现且不重叠，修改验证数据不会改变训练集归一化统计；
 - 一个合成小 batch 可完成 Critic 与 Actor 更新，所有 loss 和梯度有限；
 - checkpoint 保存/加载后相同输入给出相同 eval mode 输出。
 

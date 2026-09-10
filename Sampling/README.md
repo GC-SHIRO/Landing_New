@@ -89,6 +89,12 @@ done
 
 所有尝试回合写入 raw 文件；只有成功完整回合写入 training 文件。
 
+MoE 数据消费说明：`model/moe_td3.py` 使用 32 帧历史，保留完整回合最后的真实终止
+transition，因此 N 步回合产生 `max(0, N-32+1)` 个训练窗口。成功奖励 `+300`、
+终止动作和 `done=True` 会进入训练；不需要 Sampling 复制终止帧或修改奖励。
+各 Stage 共用的 `prepare_offline_data` 按 episode 划分训练/验证集，仅从训练集计算
+归一化统计。MoE 独立训练入口尚未实现；现有 LSTM 训练入口和数据消费行为保持现状。
+
 ## marker 丢失处理
 
 环境使用 `detection_fresh` 判断 marker 是否可见。允许短暂漏帧的时间由脚本顶部
