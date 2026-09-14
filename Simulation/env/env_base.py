@@ -26,6 +26,7 @@ import math
 import numpy as np
 import os
 import signal
+from urllib.parse import urlparse
 
 from mavros_msgs.msg import PositionTarget, ParamValue, State
 from mavros_msgs.srv import CommandBool, SetMode, ParamSet
@@ -62,7 +63,13 @@ class GazeboEnv:
                  gazebo_wait_seconds=10.0,
                  configure_rc_loss_exception=True,
                  mavros_state_timeout=30.0,
-                 mavros_param_timeout=5.0):
+                 mavros_param_timeout=5.0,
+                 launch_args=None,
+                 yolo_launch_args=None):
+        # 并行采集时每个 worker 通过 ROS_MASTER_URI 使用独立端口，
+        # 并用 launch_args / yolo_launch_args 传递 ID、gui 等 roslaunch 参数。
+        self.launch_args = list(launch_args or [])
+        self.yolo_launch_args = list(yolo_launch_args or [])
         self.roscore_process = None
         self.gazebo_process = None
         self.yolo_process = None
@@ -79,7 +86,8 @@ class GazeboEnv:
                 f"<={landing_xy_threshold:.3f}m"
             )
 
-        port = "11311"
+        master_uri = os.environ.get("ROS_MASTER_URI", "http://localhost:11311")
+        port = str(urlparse(master_uri).port or 11311)
         if rosgraph.is_master_online():
             rospy.loginfo("检测到已有 ROS master，直接复用: %s", os.environ.get("ROS_MASTER_URI", "http://localhost:11311"))
         else:
@@ -99,7 +107,8 @@ class GazeboEnv:
         rospy.loginfo("正在启动Gazebo环境...")
 
         self.gazebo_process = subprocess.Popen(
-            ["roslaunch", "-p", port, launchfile], preexec_fn=os.setsid
+            ["roslaunch", "-p", port, launchfile] + self.launch_args,
+            preexec_fn=os.setsid,
         )
         rospy.loginfo("Gazebo 环境已启动 => %s", launchfile)
         time.sleep(float(gazebo_wait_seconds))
@@ -225,7 +234,7 @@ class GazeboEnv:
             return
         try:
             rospy.loginfo("启动YOLO检测进程...")
-            launch_cmd = ["roslaunch", "yolov11_ros", "yolo_v11.launch"]
+            launch_cmd = ["roslaunch", "yolov11_ros", "yolo_v11.launch"] + self.yolo_launch_args
             self.yolo_process = subprocess.Popen(
                 launch_cmd,
                 preexec_fn=os.setsid,

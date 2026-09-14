@@ -718,3 +718,16 @@ MoE 转移表按当前 Sampling 的连续稳定两步配置修正，允许跟踪
 划分的数据记录，Stage 1/2 复用相同统计和索引。终止样本继续由 MoE 训练侧保留；
 采集器输出和 LSTM 基线接口保持不变。三个入口只做离线训练，运行方式见
 `scripts/train/README.md`。
+
+## 附：并行采集（2026-09-14）
+
+单实例采集每局约 40 到 90 秒，主要耗时是 reset 时的位置模式回飞和逐步的实时等待。
+为提高吞吐新增 `Sampling/collect_parallel.py`：
+
+- 多个 worker 各自拥有独立 ROS master、Gazebo、PX4 和 YOLO，用不同端口隔离，
+  最后合并输出；不改动单实例采集器的数据语义。
+- 只启动 gzserver。
+- 对连续 SEARCH 过长或高度长期不下降的回合提前终止，只写 raw 文件。
+- `GazeboEnv` 相应增加 `launch_args`、`yolo_launch_args`，并按 `ROS_MASTER_URI` 的端口
+  启动 roscore；不传参数时行为与原来一致。
+- 没有采用瞬移无人机缩短 reset 的方案，PX4 估计器对位置跳变不稳定。

@@ -21,10 +21,12 @@ python -m Sampling.collect_global_expert
 
 - `global_expert.py`：全局真值 PD 专家、分阶段下降和 SEARCH 控制。
 - `collect_global_expert.py`：无参数自动采集入口。
+- `collect_parallel.py`：多实例并行、无界面采集入口，带失败回合早停。
 - `validate_expert_data.py`：训练前的轻量数据检查。
 - `tests/test_global_expert.py`：专家动作方向和 SEARCH 测试。
 - `tests/test_policy_observation.py`：失检 observation 保持测试。
 - `tests/test_dataset_continuity.py`：相邻帧和 TD3 数据格式测试。
+- `tests/test_collect_parallel.py`：并行 worker 配置、早停判断和输出合并测试。
 
 旧采集器和旧质量门测试已经删除；需要追溯时直接使用 Git 历史。
 
@@ -177,6 +179,60 @@ python -m Sampling.collect_global_expert --test
 - 每次启动测试模式都会清空这两个测试文件。
 - 不会读取、覆盖或追加正式的 `global_expert.jsonl`。
 
+## 并行无界面采集
+
+`collect_parallel.py` 同时开 `NUM_WORKERS` 套独立的 ROS master、Gazebo、PX4 和 YOLO，
+每套跑与 `collect_global_expert.py` 相同的采集循环，结束后把各 worker 的输出合并到
+正式文件。它复用单实例采集器的运动类别、专家参数、observation 构造和数据格式，
+只额外做三件事：
+
+- 每个 worker 使用 `BASE_ROS_PORT + k`、`BASE_GAZEBO_PORT + k`，通过
+  `ROS_MASTER_URI` 和 `GAZEBO_MASTER_URI` 隔离；随机种子为 `RANDOM_SEED + k * WORKER_SEED_STRIDE`。
+- 以 `gui:=false` 只启动 gzserver，不开 gzclient 界面。
+- 连续 `SEARCH` 超过 `MAX_SEARCH_STREAK` 步，或 `STALL_WINDOW_STEPS` 步内相对高度下降
+  不足 `MIN_DESCENT_PROGRESS` 米，立即结束本局。这类回合只写入 raw 文件，
+  `terminal_reason` 为 `EARLY_ABORT_SEARCH` 或 `EARLY_ABORT_STALL`。
+
+### 仿真侧前置条件
+
+多套 PX4 SITL 不能共用端口，所以每个 worker 以不同的 `ID` 启动 launch 文件，
+无人机命名空间为 `iris_{ID}`。使用前请确认 Ubuntu 机器上的 launch 文件满足：
+
+- `LAUNCH_FILE` 声明 `ID` 和 `gui` 两个 arg，并按 `ID` 选择端口互不冲突的
+  PX4 实例、机型 SDF 和 MAVROS `fcu_url`（XTDrone 多机 launch 的写法）。
+- `yolo_v11.launch` 能按 `ID` 订阅对应无人机的相机话题；如果它不接受该参数，
+  修改脚本顶部的 `WORKER_YOLO_LAUNCH_ARGS`。
+- GPU 显存能容纳 `NUM_WORKERS` 份 YOLO。
+
+这些 launch 文件不在本仓库内，脚本无法自行检查。
+
+### 运行
+
+先在 `collect_parallel.py` 顶部设置 `NUM_WORKERS` 和 `TARGET_SAVED_EPISODES`
+（全部 worker 合计，平均分配），然后：
+
+```bash
+python -m Sampling.collect_parallel
+```
+
+主进程按 `WORKER_START_STAGGER_SECONDS` 错开启动 worker，每 `STATUS_INTERVAL_SECONDS`
+打印一次各 worker 进度。worker 的完整输出在 `data/expert_global/workers/worker{k}.log`，
+临时数据在同目录的 `worker{k}.jsonl` 和 `worker{k}_raw.jsonl`。全部 worker 退出后自动
+合并到 `global_expert.jsonl` 和 `global_expert_raw.jsonl`，合并后删除 worker 数据文件。
+
+冒烟测试每个 worker 只保存 1 个成功回合，写入测试文件：
+
+```bash
+python -m Sampling.collect_parallel --test
+```
+
+如果主进程异常退出导致没有合并，目录里会遗留 worker 文件，再次启动会拒绝运行。
+先手动合并：
+
+```bash
+python -m Sampling.collect_parallel --merge
+```
+
 ## 验证
 
 先在 `validate_expert_data.py` 顶部确认 `DATA_PATH`，然后运行：
@@ -202,7 +258,8 @@ python -m Sampling.validate_expert_data
 python3 -m unittest \
   Sampling.tests.test_global_expert \
   Sampling.tests.test_policy_observation \
-  Sampling.tests.test_dataset_continuity -v
+  Sampling.tests.test_dataset_continuity \
+  Sampling.tests.test_collect_parallel -v
 ```
 
 ## 训练
