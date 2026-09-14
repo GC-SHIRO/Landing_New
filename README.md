@@ -59,14 +59,6 @@ python -m scripts.train.stage1_pretrain
 python -m scripts.train.stage2_joint
 ```
 
-在线微调：
-
-```bash
-python -m scripts.train_online_finetune \
-  --ckpt_dir checkpoints/TD3/global_expert \
-  --load_step 80000
-```
-
 旧版环境评估：
 
 ```bash
