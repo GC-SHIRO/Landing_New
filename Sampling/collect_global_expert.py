@@ -106,14 +106,15 @@ EXPERT_CONFIG = ExpertConfig(
 # ==================== 动态甲板参数 ====================
 MAX_SHIP_SPEED = 0.80
 MIN_MOVING_SPEED = 0.20
+# 直线航向只在船头正前方（世界 +x，teleport 后 yaw=0）左右各 120 度内随机，
+# 避免甲板倒退驶向后方障碍物。
+MAX_HEADING_DEVIATION_DEG = 120.0
+# 第一版只采集静止和直线运动；正弦、圆周场景暂不采集，
+# 待直线数据训练验证后再决定是否恢复。
 MOTION_CLASSES: Tuple[str, ...] = (
     "static",
     "line_constant",
     "line_variable",
-    "sine_constant",
-    "sine_variable",
-    "circle_constant",
-    "circle_variable",
 )
 
 
@@ -161,9 +162,10 @@ def choose_motion_class(
 def configure_motion(
     controller: "ShipMotionController", motion_class: str, episode_seed: int
 ) -> Dict[str, Any]:
-    """为一局配置简单的随机甲板运动。"""
+    """为一局配置随机甲板运动；直线航向在船头正前方 ±MAX_HEADING_DEVIATION_DEG 内均匀随机。"""
     rng = np.random.RandomState(episode_seed)
-    heading = float(rng.uniform(0.0, 2.0 * math.pi))
+    max_deviation = math.radians(MAX_HEADING_DEVIATION_DEG)
+    heading = float(rng.uniform(-max_deviation, max_deviation))
     direction_x = math.cos(heading)
     direction_y = math.sin(heading)
     scenario: Dict[str, Any] = {
@@ -195,39 +197,7 @@ def configure_motion(
         )
         return scenario
 
-    curve = "sine" if motion_class.startswith("sine") else "circle"
-    variable = motion_class.endswith("variable")
-    speed = float(rng.uniform(0.30, MAX_SHIP_SPEED))
-
-    if curve == "sine":
-        amplitude = float(rng.uniform(0.8, 1.5))
-        wavelength = float(rng.uniform(8.0, 12.0))
-        controller.set_mode_sine(
-            speed, amplitude, wavelength, direction_x, direction_y
-        )
-        scenario.update(
-            mode="sine",
-            speed=speed,
-            amplitude=amplitude,
-            wavelength=wavelength,
-        )
-    else:
-        radius = float(rng.uniform(1.5, 2.5))
-        period = 2.0 * math.pi * radius / speed
-        controller.set_mode_circle(radius, period, direction_x, direction_y)
-        scenario.update(
-            mode="circle", speed=speed, radius=radius, period=period
-        )
-
-    if variable:
-        speed_min, speed_max = _random_speed_range(rng)
-        controller.set_mode_combined(curve, (speed_min, speed_max), episode_seed)
-        scenario.update(
-            mode=f"combined_{curve}",
-            speed_min=speed_min,
-            speed_max=speed_max,
-        )
-    return scenario
+    raise ValueError(f"未知的运动类别: {motion_class}")
 
 
 def _random_speed_range(rng: np.random.RandomState) -> Tuple[float, float]:

@@ -336,17 +336,17 @@ SEARCH 是唯一例外：水平分量直接沿用上一步 action，垂直分量
 
 ## 6. 场景生成
 
-继续覆盖当前七类场景，但统一通过一个简单入口配置：
+第一版只覆盖静止和直线三类场景，统一通过一个简单入口配置：
 
 ```text
 static
 line_constant
 line_variable
-sine_constant
-sine_variable
-circle_constant
-circle_variable
 ```
+
+直线运动的航向限制在船头正前方左右各 120 度内随机，避免甲板驶向后方障碍物。正弦和圆周场景已从采集器移除，
+`Simulation/ship_motion.py` 仍保留对应模式供评估脚本使用；
+等直线数据训练验证后再决定是否恢复采集。
 
 基本规则：
 

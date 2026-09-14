@@ -131,17 +131,16 @@ marker 可见时：
 
 ## 动态场景
 
-采集器自动平衡七类成功数据：
+采集器自动平衡三类成功数据：
 
 ```text
 static
 line_constant
 line_variable
-sine_constant
-sine_variable
-circle_constant
-circle_variable
 ```
+
+直线运动的航向在船头正前方（世界 `+x`）左右各 `MAX_HEADING_DEVIATION_DEG`（默认 120 度）内均匀随机，避免甲板向后方障碍物行驶；每个 episode 使用独立 seed。
+正弦和圆周场景暂不采集，等直线数据训练验证后再决定是否恢复。
 
 类别平衡只按成功写入训练文件的 episode 数量计算。
 
