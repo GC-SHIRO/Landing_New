@@ -730,4 +730,18 @@ MoE 转移表按当前 Sampling 的连续稳定两步配置修正，允许跟踪
 - 对连续 SEARCH 过长或高度长期不下降的回合提前终止，只写 raw 文件。
 - `GazeboEnv` 相应增加 `launch_args`、`yolo_launch_args`，并按 `ROS_MASTER_URI` 的端口
   启动 roscore；不传参数时行为与原来一致。
+- 外部 `step1_linear.launch` 使用可覆盖的 `ID`，并按 ID 派生 PX4、MAVROS 与 Gazebo
+  MAVLink 端口；默认 `ID=0` 保持原单实例端口。YOLO launch 也按 ID 选择相机话题，
+  并允许采集器指定含 PyTorch 的 Python 解释器。
+- 无界面不启动 gzclient，但 Gazebo 相机仍需要 X 渲染上下文。采集器现在为每个 worker
+  自动启动独立 Xvfb，并默认使用 Mesa 软件渲染，避免多个实例共用桌面 `:0` 的 OpenGL 上下文。
+- 2026-09-18 的三实例试运行中，后启动实例持续失检；改为独立 Xvfb/Mesa 后需要由使用者
+  在实际仿真主机执行双 worker 冒烟测试确认吞吐量和视觉帧稳定性。
 - 没有采用瞬移无人机缩短 reset 的方案，PX4 估计器对位置跳变不稳定。
+
+## 附：单 Gazebo 世界多飞行器并行采集（设计中）
+
+多 gzserver 并行时，后启动实例虽可发布相机帧，却不能稳定识别 marker。后续正式并行方案改为
+一个 Gazebo 世界中的多个空间隔离 slot：每个 slot 独立拥有 iris、WAM-V、起降平台、PX4/MAVROS、
+YOLO、碰撞话题与输出文件；worker 只控制自己的 slot，世界不再被 worker pause 或 reset。完整的
+拓扑、坐标、launch、reset 和验收约束见 `doc/multi_vehicle_parallel_collection_plan.md`。该方案尚未实现。
