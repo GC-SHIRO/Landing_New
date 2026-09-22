@@ -189,6 +189,8 @@ class GazeboEnv:
         self.yolo_distance_z = 10.0
         self.yolo_confidence = 0.0
         self.last_yolo_detection_time = rospy.Time.now()
+        # 空检测框同样表示相机与 YOLO 推理链路仍在工作；并行采集以此判断模型启动完成。
+        self.last_yolo_message_time = None
         self.drone_linear_velocity = None
         self.deck_contact = False
 
@@ -287,6 +289,8 @@ class GazeboEnv:
 
     def yolo_boxes_callback(self, msg):
         """保存与中心点话题同一检测顺序的 YOLO 置信度。"""
+        # 无 marker 时 YOLO 仍会发布空 BoundingBoxes；更新时间用于区分“无目标”和“无视觉帧”。
+        self.last_yolo_message_time = rospy.Time.now()
         boxes = getattr(msg, "bounding_boxes", ())
         if not boxes:
             # 空检测帧应立即反映为无置信度，不能沿用上一帧数值。

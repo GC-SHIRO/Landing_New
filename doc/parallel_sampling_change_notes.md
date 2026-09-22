@@ -119,16 +119,20 @@ worker 数据文件，日志保留。主进程每 `STATUS_INTERVAL_SECONDS` 打�
 - `GazeboEnv.__init__` 新增 `launch_args` 和 `yolo_launch_args`，分别追加到 Gazebo 和
   YOLO 的 roslaunch 命令。
 
-### 3.4 仿真侧前置条件
+### 3.4 仿真侧兼容配置
 
 多套 PX4 SITL 不能共用端口，所以每个 worker 以不同 `ID` 启动，无人机命名空间为
-`iris_{ID}`。以下 launch 文件不在仓库内，脚本无法自行检查，使用前需在 Ubuntu 机器上确认：
+`iris_{ID}`。本机已对仓库外 launch 作如下兼容修改，`ID=0` 时保持原单实例行为：
 
-1. `LAUNCH_FILE`（`step1_linear.launch`）声明 `ID` 和 `gui` 两个 arg，并按 `ID` 选择
-   端口互不冲突的 PX4 实例、机型 SDF 和 MAVROS `fcu_url`。XTDrone 多机 launch 是这种写法。
-2. `yolo_v11.launch` 能按 `ID` 订阅对应无人机的相机话题。不行的话修改脚本顶部的
-   `WORKER_YOLO_LAUNCH_ARGS`。
-3. GPU 显存能容纳 `NUM_WORKERS` 份 YOLO。
+1. `step1_linear.launch` 将 `ID` 改为可覆盖的参数，MAVROS namespace 使用 `iris_$(arg ID)`，
+   PX4/MAVROS/Gazebo MAVLink 端口随 ID 偏移。
+2. `single_vehicle_spawn_xtd.launch` 将传入的 MAVLink UDP 端口写入生成的 SDF，避免两个
+   gzserver 使用同一端口。
+3. `yolo_v11.launch` 声明 `ID`，订阅 `/iris_{ID}/stereo_camera/*`；并接受
+   `python_executable`，并行采集指定含 PyTorch 和 ROS 模块的 `lab_env` 解释器。
+4. 不启动 gzclient 时 Gazebo 相机仍需要 X 渲染上下文。采集器优先继承 `DISPLAY`，未设置时
+   使用 `HEADLESS_DISPLAY`；纯服务器应在 Xvfb 中运行。
+5. GPU 显存必须能容纳 `NUM_WORKERS` 份 YOLO。
 
 ### 3.5 运行方法
 
@@ -164,7 +168,9 @@ python -m Sampling.validate_expert_data
 - 新增 `Sampling/tests/test_collect_parallel.py` 8 个测试：端口和种子隔离、目标平均分配、
   测试模式独立文件、早停两条规则和重置、合并追加与删除来源、拒绝同名文件。
 - Sampling 25 个离线测试通过，`compileall` 和 `git diff --check` 通过。
-- 仿真侧未运行，本机没有 ROS、Gazebo、PX4 和 YOLO。
+- 2026-09-18 双 worker `--test` 已运行：worker 0 采到 1 个 223 步的成功落地回合，
+  `next_observation` 连续；worker 1 的三个随机起点均未检测到 marker，正常退出。两者的
+  ROS/PX4/MAVROS/YOLO 进程均独立启动并清理，未出现端口或命名空间冲突。
 
 ### 3.7 涉及文件
 

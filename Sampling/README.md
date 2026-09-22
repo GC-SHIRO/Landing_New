@@ -188,7 +188,16 @@ python -m Sampling.collect_global_expert --test
 
 - 每个 worker 使用 `BASE_ROS_PORT + k`、`BASE_GAZEBO_PORT + k`，通过
   `ROS_MASTER_URI` 和 `GAZEBO_MASTER_URI` 隔离；随机种子为 `RANDOM_SEED + k * WORKER_SEED_STRIDE`。
-- 以 `gui:=false` 只启动 gzserver，不开 gzclient 界面。
+- 以 `gui:=false` 只启动 gzserver，不开 gzclient 界面；每个 worker 自动启动独立的
+  Xvfb 显示器，并设定 `LIBGL_ALWAYS_SOFTWARE=1`，使 Gazebo 相机在没有桌面或多个
+  实例并行时使用相互隔离的 Mesa 离屏渲染上下文。
+- worker 在开始计入回合尝试前，会最多等待 `YOLO_READY_TIMEOUT_SECONDS` 秒以取得首个
+  YOLO `BoundingBoxes` 消息；空检测也代表相机与模型链路已就绪，避免较晚启动的模型加载期间
+  耗尽 `--test` 的尝试次数。
+- 并行无头模式使用 `PARALLEL_INITIAL_DETECTION_WAIT_SECONDS=20` 秒等待每局起始位置的
+  marker，给 Mesa 双实例的相机和推理频率留出稳定时间；不改变单实例采集器的默认等待。
+- 默认 `YOLO_CPU_WORKERS=(1,)`：worker 0 使用 GPU，worker 1 隐藏 CUDA、使用 CPU 推理，
+  避免当前单 GPU 上双 YOLO 进程互相导致空检测。多 GPU 环境确认稳定后可改为空元组。
 - 连续 `SEARCH` 超过 `MAX_SEARCH_STREAK` 步，或 `STALL_WINDOW_STEPS` 步内相对高度下降
   不足 `MIN_DESCENT_PROGRESS` 米，立即结束本局。这类回合只写入 raw 文件，
   `terminal_reason` 为 `EARLY_ABORT_SEARCH` 或 `EARLY_ABORT_STALL`。
@@ -202,6 +211,12 @@ python -m Sampling.collect_global_expert --test
   PX4 实例、机型 SDF 和 MAVROS `fcu_url`（XTDrone 多机 launch 的写法）。
 - `yolo_v11.launch` 能按 `ID` 订阅对应无人机的相机话题；如果它不接受该参数，
   修改脚本顶部的 `WORKER_YOLO_LAUNCH_ARGS`。
+- `YOLO_PYTHON_EXECUTABLE` 指向同时安装 PyTorch 与 ROS Python 模块的解释器；当前默认
+  使用本机 `lab_env`，避免 roslaunch 通过系统 Python 启动 YOLO。
+- 无头采集依赖系统包 `xvfb`。脚本为 worker `k` 自动创建 `:(BASE_XVFB_DISPLAY + k)`，
+  结束时关闭；不依赖桌面 `DISPLAY`，也不启动 gzclient。默认启用 Mesa 软件渲染以避免
+  多个 Gazebo 相机争用同一个 GPU/X 上下文；若后续验证 GPU 多实例稳定，可将
+  `FORCE_SOFTWARE_RENDERING` 改为 `False`。
 - GPU 显存能容纳 `NUM_WORKERS` 份 YOLO。
 
 这些 launch 文件不在本仓库内，脚本无法自行检查。
@@ -209,7 +224,8 @@ python -m Sampling.collect_global_expert --test
 ### 运行
 
 先在 `collect_parallel.py` 顶部设置 `NUM_WORKERS` 和 `TARGET_SAVED_EPISODES`
-（全部 worker 合计，平均分配），然后：
+（全部 worker 合计，平均分配）。当前默认是 2 个 worker、剩余 454 个成功回合；与本轮已写入的
+46 个成功回合合计为 500 个。然后：
 
 ```bash
 python -m Sampling.collect_parallel
@@ -225,6 +241,9 @@ python -m Sampling.collect_parallel
 ```bash
 python -m Sampling.collect_parallel --test
 ```
+
+测试模式的 worker 使用同一已验证的随机起点序列，仅用于检查多进程无头渲染、ROS/PX4
+隔离和数据链路；正式采集仍为每个 worker 使用不同随机种子。
 
 如果主进程异常退出导致没有合并，目录里会遗留 worker 文件，再次启动会拒绝运行。
 先手动合并：
