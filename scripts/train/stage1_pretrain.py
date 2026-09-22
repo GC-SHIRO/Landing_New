@@ -4,19 +4,19 @@ from model.moe_td3 import PROJECT_ROOT
 from scripts.train.common import run_stage
 
 # 输入输出：显式选定上游存档，不自动挑选最新模型。
-EXPERIMENT_DIR = PROJECT_ROOT / "checkpoints" / "MoE_TD3" / "experiment_01"
+EXPERIMENT_DIR = PROJECT_ROOT / "checkpoints" / "MoE_TD3" / "trial_286ep_20260921"
 INPUT_CHECKPOINT = EXPERIMENT_DIR / "stage0" / "final.pt"
 OUTPUT_DIR = EXPERIMENT_DIR / "stage1"
 RESUME_CHECKPOINT = None
 
 # 预训练：冻结 encoder 时只更新 Router 和动作头，Critic 始终不更新。
 TRAINING_SETTINGS = dict(
-    training_steps=20_000, batch_size=64, lr_actor=1e-4,
+    training_steps=5_000, batch_size=64, lr_actor=1e-4,
     pretrain_freeze_encoder=True, pretrain_encoder_lr_scale=0.1,
     pretrain_bc_weight=1.0, router_loss_weight=1.0,
-    log_every=100, save_every=5000,
+    log_every=100, save_every=2_500,
 )
-EVAL_EVERY = 1000
+EVAL_EVERY = 500
 
 
 def run(*, input_checkpoint=INPUT_CHECKPOINT, output_dir=OUTPUT_DIR,
