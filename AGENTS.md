@@ -29,12 +29,13 @@
 
 - `model/td3_offline.py` 是离线训练数据接口的唯一标准；除非用户明确要求，否则不要修改它。
 - Sampling 输出必须包含：`observation`、`action`、`reward`、`next_observation`、`done`。
-- 默认保持 `state_dim=3`、`action_dim=3`、`max_action=1.0` 和 `seq_len=8` 的兼容性。
-- Sampling 写原始 observation，不提前归一化；归一化由 `scripts/train_offline.py` 完成。
+- 默认保持 `state_dim=10`、`action_dim=3`、`max_action=1.0` 的兼容性；observation 依次为 YOLO 相对位置、速度、加速度（各三维）和 YOLO 置信度。
+- 序列长度：LSTM 版 `model/td3_offline.py` 使用 `seq_len=8`，MoE 版 `model/moe_td3.py` 使用 `seq_len=32`。
+- Sampling 写原始 observation，不提前归一化；归一化由训练入口（`scripts/train_offline.py` 或 `scripts/train/` 各阶段）完成。
 - 每行保存一个完整 episode，不删除中间 transition，不拼接不相邻帧。
 - 必须满足 `step[i].next_observation == step[i+1].observation`。
 - 只把完整成功 episode 写入正式训练文件；失败尝试可以写入独立 raw 文件。
-- marker 失检时保持上一有效三维视觉 observation，不使用全局真值冒充策略输入。
+- marker 失检时位置保持上一有效 YOLO 位置，速度、加速度和置信度置零；不使用全局真值冒充策略输入。
 - 非近地失检进入 `SEARCH`：保持上一实际 action 的水平分量，并使用正 z 上升。
 - 近地失检不进入 `SEARCH`，继续使用全局真值专家完成低速触地。
 - 重新检测到 marker 后立即退出 `SEARCH`，恢复正常专家控制。
@@ -50,4 +51,5 @@
 ## 文档同步
 
 - Sampling 的入口、参数、输出文件或数据语义变化时，同步更新 `Sampling/README.md`。
-- 重要架构决定同步更新 `doc/sampling_refactor_plan.md`。
+- 重要架构决定写入 `doc/` 下的新文档，并在 `doc/README.md` 登记；`doc/archive/` 只做历史追溯，不再更新。
+- 依赖或版本约束变化时，同步更新 `requirements.txt`、`requirements-sim.txt` 和 `doc/environment.md`。

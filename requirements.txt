@@ -1,0 +1,6 @@
+# 离线训练与测试依赖，说明见 doc/environment.md。
+# PyTorch 请按本机 CUDA 版本选择安装源；>=1.13 是 weights_only 参数的最低要求。
+numpy>=1.20
+torch>=1.13
+tensorboard
+pandas

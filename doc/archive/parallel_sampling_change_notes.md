@@ -58,7 +58,7 @@
 `Simulation/ship_motion.py` 的正弦、圆周模式保留，`step_env.py`、`step0_env.py` 和
 `dynamic_episode_runner.py` 的评估流程仍在使用。
 
-`Sampling/README.md` 与 `doc/sampling_refactor_plan.md` 已同步。
+`Sampling/README.md` 与 `doc/archive/sampling_refactor_plan.md` 已同步。
 
 ## 3. 未提交的改动：并行无界面采集
 
@@ -180,7 +180,7 @@ python -m Sampling.validate_expert_data
 | `Sampling/tests/test_collect_parallel.py` | 新增 |
 | `Simulation/env/env_base.py` | 端口读 `ROS_MASTER_URI`，新增两个 launch 参数 |
 | `Sampling/README.md` | 新增"并行无界面采集"一节 |
-| `doc/sampling_refactor_plan.md` | 追加并行采集说明 |
+| `doc/archive/sampling_refactor_plan.md` | 追加并行采集说明 |
 
 ## 4. 遗留事项
 

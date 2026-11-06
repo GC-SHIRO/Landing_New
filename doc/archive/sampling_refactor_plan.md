@@ -708,7 +708,7 @@ python -m scripts.train_offline \
 MoE 转移表按当前 Sampling 的连续稳定两步配置修正，允许跟踪直接进入近地阶段，
 以及下降、近地阶段重新对准/跟踪和近地阶段随相对高度增大恢复下降。
 采集器控制律、phase 标签与数据输出保持现状，不追加全面的数据审核流程。
-具体转移表和配置前提见 `doc/moe_td3_implementation_spec.md`；新增离线回归测试
+具体转移表和配置前提见 `doc/archive/moe_td3_implementation_spec.md`；新增离线回归测试
 直接调用全局专家验证转移、replay 装载和 Router mask，不启动仿真。
 
 ## 18. MoE 三阶段训练入口（2026-09-10）
@@ -744,4 +744,4 @@ MoE 转移表按当前 Sampling 的连续稳定两步配置修正，允许跟踪
 多 gzserver 并行时，后启动实例虽可发布相机帧，却不能稳定识别 marker。后续正式并行方案改为
 一个 Gazebo 世界中的多个空间隔离 slot：每个 slot 独立拥有 iris、WAM-V、起降平台、PX4/MAVROS、
 YOLO、碰撞话题与输出文件；worker 只控制自己的 slot，世界不再被 worker pause 或 reset。完整的
-拓扑、坐标、launch、reset 和验收约束见 `doc/multi_vehicle_parallel_collection_plan.md`。该方案尚未实现。
+拓扑、坐标、launch、reset 和验收约束见 `doc/archive/multi_vehicle_parallel_collection_plan.md`。该方案尚未实现。

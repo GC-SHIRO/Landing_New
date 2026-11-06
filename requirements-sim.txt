@@ -1,0 +1,3 @@
+# 仿真侧 pip 依赖；ROS、Gazebo、PX4、MAVROS 与 YOLO ROS 包需另行安装，见 doc/environment.md。
+-r requirements.txt
+pyquaternion

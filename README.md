@@ -16,7 +16,8 @@ data/expert_data/       传统专家数据
 data/expert_global/     全局真值专家采集数据
 data/evaluation/        评估输出
 checkpoints/            权重、归一化统计和训练日志
-doc/                    设计与重构文档
+doc/                    环境依赖与文档索引
+doc/archive/            已归档的设计与重构文档
 ```
 
 旧版 `landing_env.py` 已迁移为
@@ -67,7 +68,13 @@ python -m scripts.evaluate_iros
 
 ## 依赖
 
-离线训练和检查依赖 Python 3.8+、NumPy、PyTorch、Pandas 和 TensorBoard。
-仿真入口还依赖 ROS、Gazebo、MAVROS、PX4 相关消息以及 YOLO 检测节点。
+离线训练和检查依赖 Python 3.8+、PyTorch 1.13+、NumPy、Pandas 和 TensorBoard：
+
+```bash
+pip install -r requirements.txt
+```
+
+仿真入口还依赖 ROS1、Gazebo、PX4、MAVROS 以及 YOLO 检测节点，pip 部分见
+`requirements-sim.txt`。完整版本约束和仓库外资源见 [环境依赖](doc/environment.md)。
 
 代理默认只运行不依赖 ROS、Gazebo、PX4 和 YOLO 的离线测试；仿真由用户手动启动。
