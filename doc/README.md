@@ -5,6 +5,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [environment.md](environment.md) | 离线训练与仿真采集的环境依赖、版本约束和外部资源 |
+| [ros2_migration_plan.md](ros2_migration_plan.md) | 迁移到 ROS2 Jazzy + Gazebo Harmonic + PX4 新仓库的方案（未实施） |
 
 运行入口和数据约定以仓库根目录 `README.md`、`Sampling/README.md`、
 `scripts/train/README.md` 为准。
